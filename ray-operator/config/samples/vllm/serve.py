@@ -160,7 +160,7 @@ def build_app() -> serve.Application:
         "model": os.environ['MODEL_1_ID'],
         "tensor_parallel_size": int(os.environ['MODEL_1_TENSOR_PARALLELISM']),
         # optional quantization
-        # "quantize": os.environ.get('MODEL_1_QUANTIZE', None),
+        "quantization": os.environ.get('MODEL_1_QUANTIZE', None),
     }
     models_handles[os.environ['MODEL_1_ID']] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 4}).bind(**model_1_kwargs)
@@ -170,7 +170,7 @@ def build_app() -> serve.Application:
         "model": os.environ['MODEL_2_ID'],
         "tensor_parallel_size": int(os.environ['MODEL_2_TENSOR_PARALLELISM']),
         # optional quantization
-        # "quantize":  os.environ.get('MODEL_2_QUANTIZE', None),
+        "quantization":  os.environ.get('MODEL_2_QUANTIZE', None),
     }
     models_handles[os.environ['MODEL_2_ID']] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 4}).bind(**model_2_kwargs)
