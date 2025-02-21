@@ -5,6 +5,8 @@ import logging
 import json
 import os
 import random
+from typing import AsyncGenerator
+
 
 from fastapi import FastAPI
 from starlette.requests import Request
