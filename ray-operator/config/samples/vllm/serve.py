@@ -145,12 +145,12 @@ class MultiModelDeployment:
         if model_id in self.models:
             # pass request to create_chat_completion
             logger.info(f"Model ID: {model_id}")
-            response = await self.models[model_id].create_chat_completion.remote(model_request, request)
+            response = await self.models[model_id].create_chat_completion.remote(model_request)
         elif not model_id:
             model_id = random.choice(list(self.models.keys()))
             # pass request to create_chat_completion
             logger.info(f"Model ID: {model_id}")
-            response = await self.models[model_id].create_chat_completion.remote(model_request, request)
+            response = await self.models[model_id].create_chat_completion.remote(model_request)
         else:
             return Response(status_code=400, content=json.dumps({"message": "invalid model ID"}))
 
