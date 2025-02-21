@@ -125,7 +125,7 @@ class VLLMDeployment:
         assert final_output is not None
         prompt = final_output.prompt
         text_outputs = [
-            prompt + output.text for output in final_output.outputs]
+            output.text for output in final_output.outputs]
         logger.info(f"Text outputs: {text_outputs}")
         ret = {"text": text_outputs}
         return json.dumps(ret)
