@@ -99,13 +99,17 @@ class VLLMDeployment:
         - other fields: the sampling parameters (See `SamplingParams` for details).
         """
         # request_dict = await request.json()
+        logger.info(f"Received request: {request_dict}")
         prompt = request_dict.pop("prompt")
         stream = request_dict.pop("stream", False)
         sampling_params = SamplingParams(**request_dict)
         request_id = random_uuid()
+        logger.info(f"Request ID: {request_id}")
         results_generator = self.engine.generate(
             prompt, sampling_params, request_id)
+        logger.info(f"Results generator: {results_generator}")
         if stream:
+            logger.info("Streaming results")
             background_tasks = BackgroundTasks()
             # Using background_taks to abort the the request
             # if the client disconnects.
@@ -122,6 +126,7 @@ class VLLMDeployment:
         prompt = final_output.prompt
         text_outputs = [
             prompt + output.text for output in final_output.outputs]
+        logger.info(f"Text outputs: {text_outputs}")
         ret = {"text": text_outputs}
         return json.dumps(ret)
 
@@ -139,10 +144,12 @@ class MultiModelDeployment:
         model_id = request.headers.get("Model-ID")
         if model_id in self.models:
             # pass request to create_chat_completion
+            logger.info(f"Model ID: {model_id}")
             response = await self.models[model_id].create_chat_completion.remote(model_request, request)
         elif not model_id:
             model_id = random.choice(list(self.models.keys()))
             # pass request to create_chat_completion
+            logger.info(f"Model ID: {model_id}")
             response = await self.models[model_id].create_chat_completion.remote(model_request, request)
         else:
             return Response(status_code=400, content=json.dumps({"message": "invalid model ID"}))
@@ -161,7 +168,7 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": int(os.environ['MODEL_1_TENSOR_PARALLELISM']),
         # optional quantization
         # "quantization": os.environ.get('MODEL_1_QUANTIZE', None),
-        "quantization": "awq",
+        "quantization": "awq_marlin",
     }
     models_handles[os.environ['MODEL_1_ID']] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 4}).bind(**model_1_kwargs)
@@ -172,7 +179,7 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": int(os.environ['MODEL_2_TENSOR_PARALLELISM']),
         # optional quantization
         # "quantization":  os.environ.get('MODEL_2_QUANTIZE', None),
-        "quantization": "awq",
+        "quantization": "awq_marlin",
     }
     models_handles[os.environ['MODEL_2_ID']] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 4}).bind(**model_2_kwargs)
