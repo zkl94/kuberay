@@ -74,7 +74,7 @@ class VLLMDeployment:
         """
         args = AsyncEngineArgs(**kwargs)
         # https://github.com/vllm-project/vllm/issues/8402#issuecomment-2489432973
-        # del os.environ['CUDA_VISIBLE_DEVICES']
+        del os.environ['CUDA_VISIBLE_DEVICES']
         self.engine = AsyncLLMEngine.from_engine_args(args)
 
     async def stream_results(self, results_generator) -> AsyncGenerator[bytes, None]:
