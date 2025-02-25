@@ -1,14 +1,12 @@
 import os
-
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, AsyncGenerator, Union, Any
 import logging
 import json
-import os
 import random
-from typing import AsyncGenerator
+import time
+from dataclasses import asdict
 
-
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from starlette.requests import Request
 from starlette.responses import StreamingResponse, JSONResponse, Response
 
@@ -17,118 +15,253 @@ from ray.serve.handle import DeploymentHandle
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.sampling_params import SamplingParams
+from vllm.utils import random_uuid
+
+# OpenAI API类型定义，用于兼容OpenAI API
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
+    ChatMessage,
+    DeltaMessage,
+    FunctionCall,
+    ModelCard,
+    ModelList,
     ErrorResponse,
+    UsageInfo,
 )
-from vllm.sampling_params import SamplingParams
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_engine import LoRAModulePath, PromptAdapterPath
-from vllm.utils import FlexibleArgumentParser
-from vllm.entrypoints.logger import RequestLogger
-from vllm.utils import random_uuid
-from fastapi import BackgroundTasks
 
 logger = logging.getLogger("ray.serve")
 
 app = FastAPI()
+
+# 转换聊天消息为提示文本的函数
+
+
+def messages_to_prompt(messages: List[Dict[str, str]], model_id: str) -> str:
+    """根据模型ID选择适当的提示格式转换函数"""
+    if "deepseek" in model_id.lower():
+        return deepseek_messages_to_prompt(messages)
+    elif "mistral" in model_id.lower():
+        return mistral_messages_to_prompt(messages)
+    else:
+        # 默认格式，可根据需要扩展
+        return default_messages_to_prompt(messages)
+
+
+def deepseek_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
+    """为DeepSeek模型格式化聊天消息"""
+    prompt = ""
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+        if role == "system":
+            prompt += f"{content}\n"
+        elif role == "user":
+            prompt += f"Human: {content}\n"
+        elif role == "assistant":
+            prompt += f"Assistant: {content}\n"
+        else:
+            prompt += f"{role.capitalize()}: {content}\n"
+    prompt += "Assistant: "
+    return prompt
+
+
+def mistral_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
+    """为Mistral模型格式化聊天消息"""
+    prompt = ""
+    system_message = ""
+
+    # 提取系统消息
+    for message in messages:
+        if message["role"] == "system":
+            system_message += message["content"] + "\n"
+
+    # 添加系统消息到提示前部
+    if system_message:
+        prompt = f"<s>[INST] {system_message}\n"
+    else:
+        prompt = "<s>[INST] "
+
+    # 添加用户和助手消息
+    for i, message in enumerate(messages):
+        if message["role"] == "system":
+            continue
+        elif message["role"] == "user":
+            if i > 0 and messages[i-1]["role"] == "assistant":
+                prompt += f"[/INST]\n\n[INST] {message['content']}"
+            else:
+                prompt += message["content"]
+        elif message["role"] == "assistant":
+            prompt += f" [/INST]\n\n{message['content']}\n\n"
+
+    # 确保提示以用户消息结尾，并为助手添加响应前缀
+    if messages[-1]["role"] == "user":
+        prompt += " [/INST]\n\n"
+
+    return prompt
+
+
+def default_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
+    """通用聊天消息格式化"""
+    prompt = ""
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+        prompt += f"{role.capitalize()}: {content}\n"
+    prompt += "Assistant: "
+    return prompt
 
 
 @serve.deployment(name="VLLMDeployment")
 class VLLMDeployment:
     def __init__(self, **kwargs):
         """
-        Construct a VLLM deployment.
+        构建一个VLLM部署。
 
-        Refer to https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
-        for the full list of arguments.
-
-        Args:
-            model: name or path of the huggingface model to use
-            download_dir: directory to download and load the weights,
-                default to the default cache dir of huggingface.
-            use_np_weights: save a numpy copy of model weights for
-                faster loading. This can increase the disk usage by up to 2x.
-            use_dummy_weights: use dummy values for model weights.
-            dtype: data type for model weights and activations.
-                The "auto" option will use FP16 precision
-                for FP32 and FP16 models, and BF16 precision.
-                for BF16 models.
-            seed: random seed.
-            worker_use_ray: use Ray for distributed serving, will be
-                automatically set when using more than 1 GPU
-            pipeline_parallel_size: number of pipeline stages.
-            tensor_parallel_size: number of tensor parallel replicas.
-            block_size: token block size.
-            swap_space: CPU swap space size (GiB) per GPU.
-            gpu_memory_utilization: the percentage of GPU memory to be used for
-                the model executor
-            max_num_batched_tokens: maximum number of batched tokens per iteration
-            max_num_seqs: maximum number of sequences per iteration.
-            disable_log_stats: disable logging statistics.
-            engine_use_ray: use Ray to start the LLM engine in a separate
-                process as the server process.
-            disable_log_requests: disable logging requests.
+        详细参数请参考：https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
         """
+        self.model_id = kwargs.get("model")
         args = AsyncEngineArgs(**kwargs)
         # https://github.com/vllm-project/vllm/issues/8402#issuecomment-2489432973
-        del os.environ['CUDA_VISIBLE_DEVICES']
+        if 'CUDA_VISIBLE_DEVICES' in os.environ:
+            del os.environ['CUDA_VISIBLE_DEVICES']
         self.engine = AsyncLLMEngine.from_engine_args(args)
 
-    async def stream_results(self, results_generator) -> AsyncGenerator[bytes, None]:
-        num_returned = 0
-        async for request_output in results_generator:
-            text_outputs = [output.text for output in request_output.outputs]
-            assert len(text_outputs) == 1
-            text_output = text_outputs[0][num_returned:]
-            ret = {"text": text_output}
-            yield (json.dumps(ret) + "\n").encode("utf-8")
-            num_returned += len(text_output)
+    async def stream_completion(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
+        """生成流式完成响应"""
+        choice_data = ChatCompletionResponseStreamChoice(
+            index=0, delta=DeltaMessage(role="assistant"), finish_reason=None
+        )
+        chunk = ChatCompletionStreamResponse(
+            id=random_uuid(),
+            model=model_id,
+            choices=[choice_data],
+            created=int(time.time()),
+            object="chat.completion.chunk",
+        )
+        yield f"data: {json.dumps(asdict(chunk))}\n\n"
 
-    async def may_abort_request(self, request_id) -> None:
-        await self.engine.abort(request_id)
+        async for request_output in request_output_generator:
+            if len(request_output.outputs) == 0:
+                continue
 
-    async def __call__(self, request_dict: dict) -> str:
-        """Generate completion for the request.
+            delta_text = request_output.outputs[0].text
+            choice_data = ChatCompletionResponseStreamChoice(
+                index=0, delta=DeltaMessage(content=delta_text), finish_reason=None
+            )
+            chunk = ChatCompletionStreamResponse(
+                id=random_uuid(),
+                model=model_id,
+                choices=[choice_data],
+                created=int(time.time()),
+                object="chat.completion.chunk",
+            )
+            yield f"data: {json.dumps(asdict(chunk))}\n\n"
 
-        The request should be a JSON object with the following fields:
-        - prompt: the prompt to use for the generation.
-        - stream: whether to stream the results or not.
-        - other fields: the sampling parameters (See `SamplingParams` for details).
-        """
-        # request_dict = await request.json()
-        logger.info(f"Received request: {request_dict}")
-        prompt = request_dict.pop("prompt")
-        stream = request_dict.pop("stream", False)
-        sampling_params = SamplingParams(**request_dict)
+        # 发送最终完成信号
+        choice_data = ChatCompletionResponseStreamChoice(
+            index=0, delta=DeltaMessage(), finish_reason="stop"
+        )
+        chunk = ChatCompletionStreamResponse(
+            id=random_uuid(),
+            model=model_id,
+            choices=[choice_data],
+            created=int(time.time()),
+            object="chat.completion.chunk",
+        )
+        yield f"data: {json.dumps(asdict(chunk))}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def handle_chat_request(self, request: ChatCompletionRequest, model_id: str) -> Union[ChatCompletionResponse, StreamingResponse]:
+        """处理聊天完成请求"""
         request_id = random_uuid()
-        logger.info(f"Request ID: {request_id}")
+
+        # 从请求中提取消息和参数
+        messages = [msg.dict() for msg in request.messages]
+        prompt = messages_to_prompt(messages, model_id)
+
+        # 提取采样参数
+        sampling_params = SamplingParams(
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens or 1024,
+            stop=request.stop,
+            frequency_penalty=getattr(request, "frequency_penalty", 0.0),
+            presence_penalty=getattr(request, "presence_penalty", 0.0),
+        )
+
+        # 获取生成结果
         results_generator = self.engine.generate(
             prompt, sampling_params, request_id)
-        logger.info(f"Results generator: {results_generator}")
-        if stream:
-            logger.info("Streaming results")
+
+        if request.stream:
+            # 返回流式响应
             background_tasks = BackgroundTasks()
-            # Using background_taks to abort the the request
-            # if the client disconnects.
-            background_tasks.add_task(self.may_abort_request, request_id)
+            background_tasks.add_task(
+                self.abort_request_on_disconnect, request_id)
             return StreamingResponse(
-                self.stream_results(results_generator), background=background_tasks
+                self.stream_completion(results_generator, model_id),
+                media_type="text/event-stream",
+                background=background_tasks,
             )
 
+        # 非流式响应
         final_output = None
         async for request_output in results_generator:
-            final_output = request_output
+            if not final_output:
+                final_output = request_output
+            else:
+                final_output = request_output
 
-        assert final_output is not None
-        prompt = final_output.prompt
-        text_outputs = [
-            output.text for output in final_output.outputs]
-        logger.info(f"Text outputs: {text_outputs}")
-        ret = {"text": text_outputs}
-        return json.dumps(ret)
+        generated_text = final_output.outputs[0].text if final_output.outputs else ""
+
+        # 计算令牌用量
+        prompt_tokens = final_output.prompt_token_ids.shape[0]
+        completion_tokens = len(
+            final_output.outputs[0].token_ids) if final_output.outputs else 0
+
+        # 构建响应
+        choice = ChatCompletionResponseChoice(
+            index=0,
+            message=ChatMessage(role="assistant", content=generated_text),
+            finish_reason="stop",
+        )
+
+        return ChatCompletionResponse(
+            id=request_id,
+            model=model_id,
+            choices=[choice],
+            created=int(time.time()),
+            object="chat.completion",
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+        )
+
+    async def abort_request_on_disconnect(self, request_id: str) -> None:
+        """在客户端断开连接时中止请求"""
+        await self.engine.abort(request_id)
+
+    async def __call__(self, request_dict: dict) -> Any:
+        """处理聊天完成API请求"""
+        try:
+            # 解析请求为ChatCompletionRequest对象
+            request = ChatCompletionRequest(**request_dict)
+            return await self.handle_chat_request(request, self.model_id)
+        except Exception as e:
+            logger.exception(f"处理请求时出错: {e}")
+            error_response = ErrorResponse(
+                message=str(e),
+                type="invalid_request_error",
+                code=400,
+            )
+            return JSONResponse(content=asdict(error_response), status_code=400)
 
 
 @serve.deployment
@@ -136,55 +269,145 @@ class VLLMDeployment:
 class MultiModelDeployment:
     def __init__(self, models: Dict[str, DeploymentHandle]):
         self.models = models
+        # 创建模型ID到用户友好名称的映射
+        self.model_id_to_name = {
+            "Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ": "deepseek-r1-32b",
+            "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ": "mistral-small-24b",
+        }
+        # 反向映射，方便查找
+        self.name_to_model_id = {v: k for k,
+                                 v in self.model_id_to_name.items()}
+
+    @app.get("/v1/models")
+    async def list_models(self):
+        """列出可用的模型，兼容OpenAI API"""
+        available_models = []
+        for model_id in self.models.keys():
+            model_name = self.model_id_to_name.get(model_id, model_id)
+            available_models.append(
+                ModelCard(
+                    id=model_name,
+                    object="model",
+                    created=int(time.time()),
+                    owned_by="kuberay-user",
+                )
+            )
+        return ModelList(data=available_models, object="list")
 
     @app.post("/v1/chat/completions")
     async def create_chat_completion(self, request: Request):
-        model_request = await request.json()
-        # or serve.get_multiplexed_model_id() if you set multiplexed_model_id in ray serve config
-        model_id = request.headers.get("Model-ID")
-        if model_id in self.models:
-            # pass request to create_chat_completion
-            logger.info(f"Model ID: {model_id}")
-            response = await self.models[model_id].remote(model_request)
-        elif not model_id:
-            model_id = random.choice(list(self.models.keys()))
-            # pass request to create_chat_completion
-            logger.info(f"Model ID: {model_id}")
-            response = await self.models[model_id].remote(model_request)
-        else:
-            return Response(status_code=400, content=json.dumps({"message": "invalid model ID"}))
+        """创建聊天完成，兼容OpenAI API"""
+        try:
+            model_request = await request.json()
 
-        return Response(content=response)
+            # 从请求中获取模型ID
+            requested_model = model_request.get("model", "")
+
+            # 从请求头获取模型ID，优先级高于请求中的model字段
+            header_model_id = request.headers.get("Model-ID")
+
+            # 决定使用哪个模型
+            if header_model_id and header_model_id in self.models:
+                model_id = header_model_id
+            elif requested_model in self.name_to_model_id:
+                # 如果用户使用简短名称，转换为完整ID
+                model_id = self.name_to_model_id[requested_model]
+            elif requested_model in self.models:
+                # 用户直接使用了完整ID
+                model_id = requested_model
+            elif not header_model_id and not requested_model:
+                # 没有指定模型，随机选择
+                model_id = random.choice(list(self.models.keys()))
+            else:
+                # 无效的模型ID
+                error_message = {
+                    "error": {
+                        "message": f"模型 '{requested_model or header_model_id}' 不存在",
+                        "type": "invalid_request_error",
+                        "code": "model_not_found",
+                    }
+                }
+                return JSONResponse(status_code=404, content=error_message)
+
+            # 替换请求中的模型为内部模型ID，方便处理
+            model_request["model"] = model_id
+
+            logger.info(f"使用模型ID: {model_id}")
+            model_handle = self.models[model_id]
+
+            # 将请求传递给相应的模型处理
+            response = await model_handle.remote(model_request)
+
+            # 如果是流式响应，直接返回
+            if isinstance(response, StreamingResponse):
+                return response
+
+            # 转换响应格式，替换内部模型ID为用户友好名称
+            if hasattr(response, "model") and response.model in self.model_id_to_name:
+                response.model = self.model_id_to_name[response.model]
+
+            # 将响应对象转换为dict
+            if hasattr(response, "dict"):
+                response_dict = response.dict()
+                return JSONResponse(content=response_dict)
+
+            return JSONResponse(content=response)
+
+        except Exception as e:
+            logger.exception(f"处理聊天完成请求时出错: {e}")
+            error_response = {
+                "error": {
+                    "message": str(e),
+                    "type": "internal_server_error",
+                    "code": 500,
+                }
+            }
+            return JSONResponse(status_code=500, content=error_response)
+
+    @app.get("/health")
+    async def health_check(self):
+        """健康检查端点"""
+        return {"status": "healthy"}
 
 
 def build_app() -> serve.Application:
-    """Builds the Serve app with multiple models."""
+    """构建带有多个模型的Serve应用程序。"""
 
     models_handles = {}
 
-    # Model 1
+    # 模型1: DeepSeek
+    model_1_id = os.environ.get(
+        'MODEL_1_ID', "Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ")
     model_1_kwargs = {
-        "model": os.environ['MODEL_1_ID'],
-        "tensor_parallel_size": int(os.environ['MODEL_1_TENSOR_PARALLELISM']),
-        # optional quantization
-        # "quantization": os.environ.get('MODEL_1_QUANTIZE', None),
-        "quantization": "awq_marlin",
+        "model": model_1_id,
+        "tensor_parallel_size": int(os.environ.get('MODEL_1_TENSOR_PARALLELISM', 4)),
+        "quantization": os.environ.get('MODEL_1_QUANTIZE', "awq_marlin"),
+        "dtype": "half",  # 使用FP16精度，提高推理速度
+        "gpu_memory_utilization": 0.85,  # 控制GPU内存使用率
+        "max_num_seqs": 32,  # 每次迭代的最大序列数
+        "trust_remote_code": True,  # 信任远程代码，某些模型需要
     }
-    models_handles[os.environ['MODEL_1_ID']] = VLLMDeployment.options(
-        ray_actor_options={"num_cpus": 4}).bind(**model_1_kwargs)
+    models_handles[model_1_id] = VLLMDeployment.options(
+        ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
 
-    # Model 2
+    # 模型2: Mistral
+    model_2_id = os.environ.get(
+        'MODEL_2_ID', "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ")
     model_2_kwargs = {
-        "model": os.environ['MODEL_2_ID'],
-        "tensor_parallel_size": int(os.environ['MODEL_2_TENSOR_PARALLELISM']),
-        # optional quantization
-        # "quantization":  os.environ.get('MODEL_2_QUANTIZE', None),
-        "quantization": "awq_marlin",
+        "model": model_2_id,
+        "tensor_parallel_size": int(os.environ.get('MODEL_2_TENSOR_PARALLELISM', 2)),
+        "quantization": os.environ.get('MODEL_2_QUANTIZE', "awq_marlin"),
+        "dtype": "half",
+        "gpu_memory_utilization": 0.85,
+        "max_num_seqs": 32,
+        "trust_remote_code": True,
     }
-    models_handles[os.environ['MODEL_2_ID']] = VLLMDeployment.options(
-        ray_actor_options={"num_cpus": 4}).bind(**model_2_kwargs)
+    models_handles[model_2_id] = VLLMDeployment.options(
+        ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_2_kwargs)
 
+    # 创建并返回多模型部署
     return MultiModelDeployment.bind(models_handles)
 
 
+# 在Ray Serve中暴露的应用程序
 multi_model = build_app()
