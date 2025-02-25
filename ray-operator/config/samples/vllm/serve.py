@@ -223,6 +223,7 @@ class VLLMDeployment:
 
     async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, StreamingResponse]:
         """Process a chat completion request"""
+        print("Handling chat request")
         request_id = random_uuid()
 
         # Extract messages from request
@@ -295,6 +296,7 @@ class VLLMDeployment:
 
     async def __call__(self, request_dict: dict) -> Any:
         """Handle API requests"""
+        print("Handling request")
         try:
             response = await self.handle_chat_request(request_dict, self.model_id)
 
