@@ -137,186 +137,110 @@ class VLLMDeployment:
     def __init__(self, **kwargs):
         """
         Construct a VLLM deployment.
-
-        For full parameter list, see:
-        https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
         """
         self.model_id = kwargs.get("model")
+        logger.info(f"Initializing model: {self.model_id}")
+
         args = AsyncEngineArgs(**kwargs)
+
         # Fix for CUDA device visibility issue
-        # https://github.com/vllm-project/vllm/issues/8402#issuecomment-2489432973
         if 'CUDA_VISIBLE_DEVICES' in os.environ:
             del os.environ['CUDA_VISIBLE_DEVICES']
+
         self.engine = AsyncLLMEngine.from_engine_args(args)
+        logger.info(f"Model {self.model_id} initialized successfully")
 
-    async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
-        """Generate streaming chat completion response"""
-        # First chunk with assistant role
-        print("First chunk")
-        chunk = {
-            "id": random_uuid(),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model_id,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant"},
-                    "finish_reason": None
-                }
-            ]
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
+        # Set reasonable timeout
+        self.request_timeout = 180  # 3 minutes
 
-        print("Streaming chunks")
-        # Stream content chunks
-        previous_text = ""
-        async for request_output in request_output_generator:
-            if len(request_output.outputs) == 0:
-                continue
-
-            # Get the new delta text (only what's new since last chunk)
-            current_text = request_output.outputs[0].text
-            delta_text = current_text[len(previous_text):]
-            previous_text = current_text
-
-            # Only send non-empty chunks
-            if delta_text:
-                chunk = {
-                    "id": random_uuid(),
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model_id,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": delta_text},
-                            "finish_reason": None
-                        }
-                    ]
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-
-        # Final chunk signaling completion
-        chunk = {
-            "id": random_uuid(),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model_id,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop"
-                }
-            ]
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
-        yield "data: [DONE]\n\n"
-
-    async def abort_request_on_disconnect(self, request_id: str) -> None:
-        """Abort request when client disconnects"""
-        try:
-            await self.engine.abort(request_id)
-        except Exception as e:
-            logger.error(f"Error aborting request {request_id}: {e}")
-
-    async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, StreamingResponse]:
-        """Process a chat completion request"""
-        print("Handling chat request")
+    async def handle_chat_request(self, request: dict) -> dict:
+        """Process a chat completion request and return a dictionary response"""
         request_id = random_uuid()
+        logger.info(
+            f"Processing chat request {request_id} for model {self.model_id}")
 
         # Extract messages from request
         messages = request.get("messages", [])
         if not messages:
-            raise ValueError("Messages array cannot be empty")
+            return {
+                "error": {
+                    "message": "Messages array cannot be empty",
+                    "type": "invalid_request_error",
+                    "code": 400
+                }
+            }
 
         # Convert messages to prompt text
-        prompt = messages_to_prompt(messages, model_id)
+        prompt = messages_to_prompt(messages, self.model_id)
 
         # Extract sampling parameters
         sampling_params = SamplingParams(
-            temperature=request.get("temperature", 1.0),
-            top_p=request.get("top_p", 1.0),
-            max_tokens=request.get("max_tokens", 1024),
+            temperature=request.get("temperature", 0.7),
+            top_p=request.get("top_p", 0.9),
+            max_tokens=min(request.get("max_tokens", 1024), 4096),
             stop=request.get("stop"),
             frequency_penalty=request.get("frequency_penalty", 0.0),
             presence_penalty=request.get("presence_penalty", 0.0),
         )
 
-        # Check if streaming is requested
-        stream = request.get("stream", False)
+        try:
+            # Generate text - note we ignore the stream parameter
+            # since streaming is handled by MultiModelDeployment
+            results_generator = self.engine.generate(
+                prompt, sampling_params, request_id)
 
-        # Get generation results
-        results_generator = self.engine.generate(
-            prompt, sampling_params, request_id)
+            final_output = None
+            async for request_output in results_generator:
+                final_output = request_output
 
-        if stream:
-            # Return streaming response
-            print("Streaming response")
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(
-                self.abort_request_on_disconnect, request_id)
-            print("Background tasks added")
-            return StreamingResponse(
-                self.stream_chat_response(results_generator, model_id),
-                media_type="text/event-stream",
-                background=background_tasks,
+            if not final_output or not final_output.outputs:
+                return {
+                    "error": {
+                        "message": "Failed to generate text",
+                        "type": "server_error",
+                        "code": 500
+                    }
+                }
+
+            generated_text = final_output.outputs[0].text
+            prompt_tokens = len(final_output.prompt_token_ids)
+            completion_tokens = len(
+                final_output.outputs[0].token_ids) if final_output.outputs else 0
+
+            # Create and return complete response
+            return create_chat_completion_response(
+                request_id=request_id,
+                model_id=self.model_id,
+                content=generated_text,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
             )
 
-        # Non-streaming response
-        final_output = None
-        async for request_output in results_generator:
-            final_output = request_output
-
-        if not final_output or not final_output.outputs:
+        except Exception as e:
+            logger.exception(
+                f"Error during generation for request {request_id}: {e}")
             return {
                 "error": {
-                    "message": "Failed to generate text",
+                    "message": f"Generation error: {str(e)}",
                     "type": "server_error",
                     "code": 500
                 }
             }
 
-        generated_text = final_output.outputs[0].text
-
-        # Calculate token usage
-        prompt_tokens = len(final_output.prompt_token_ids)
-        completion_tokens = len(
-            final_output.outputs[0].token_ids) if final_output.outputs else 0
-
-        # Create and return complete response
-        return create_chat_completion_response(
-            request_id=request_id,
-            model_id=model_id,
-            content=generated_text,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
-
-    async def __call__(self, request_dict: dict) -> Any:
+    async def __call__(self, request_dict: dict) -> dict:
         """Handle API requests"""
-        print("Handling request")
         try:
-            response = await self.handle_chat_request(request_dict, self.model_id)
-
-            # If response is already a StreamingResponse, return it directly
-            if isinstance(response, StreamingResponse):
-                return response
-
-            # Otherwise return a JSON response
-            return JSONResponse(content=response)
-
+            # Always return a dict, never a StreamingResponse
+            return await self.handle_chat_request(request_dict)
         except Exception as e:
             logger.exception(f"Error processing request: {e}")
-            error_response = {
+            return {
                 "error": {
                     "message": str(e),
                     "type": "invalid_request_error",
                     "code": 400
                 }
             }
-            return JSONResponse(content=error_response, status_code=400)
 
 
 @serve.deployment
@@ -347,12 +271,106 @@ class MultiModelDeployment:
             })
         return {"data": available_models, "object": "list"}
 
+    async def proxy_stream(self, request_dict: dict, model_handle: DeploymentHandle) -> AsyncGenerator[str, None]:
+        """Proxy streaming from model to client"""
+        # Setup streaming parameters
+        request_id = random_uuid()
+        model_id = request_dict.get("model", "default-model")
+
+        # First chunk with assistant role
+        chunk = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None
+                }
+            ]
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+
+        # We'll make the actual model request non-streaming
+        # and then stream the result ourselves
+        request_dict_copy = request_dict.copy()
+        request_dict_copy["stream"] = False
+
+        try:
+            # Get complete response
+            response = await model_handle.remote(request_dict_copy)
+
+            # Check if there was an error
+            if isinstance(response, dict) and "error" in response:
+                error_chunk = {
+                    "error": response["error"]
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            # Get content
+            if "choices" in response and len(response["choices"]) > 0:
+                content = response["choices"][0]["message"]["content"]
+
+                # Stream the content in small chunks
+                # Simulating streaming by breaking up the completed response
+                chunk_size = 20  # Characters per chunk
+                for i in range(0, len(content), chunk_size):
+                    chunk_content = content[i:i+chunk_size]
+                    chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_id,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": chunk_content},
+                                "finish_reason": None
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    # Small delay to make it feel like real streaming
+                    await asyncio.sleep(0.01)
+
+            # Send final chunk
+            chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model_id,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ]
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            logger.exception(f"Error in proxy streaming: {e}")
+            error_chunk = {
+                "error": {
+                    "message": f"Streaming error: {str(e)}",
+                    "type": "server_error",
+                    "code": 500
+                }
+            }
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
     @app.post("/v1/chat/completions")
     async def create_chat_completion(self, request: Request):
         """Create chat completion, compatible with OpenAI API"""
         try:
             model_request = await request.json()
-            print(type(model_request))
 
             # Get model ID from request
             requested_model = model_request.get("model", "")
@@ -386,11 +404,20 @@ class MultiModelDeployment:
             logger.info(f"Using model ID: {model_id}")
             model_handle = self.models[model_id]
 
-            # Pass request to the appropriate model handler
-            response = await model_handle.remote(model_request)
+            # Check if streaming is requested
+            is_streaming = model_request.get("stream", False)
 
-            # Pass through the response
-            return response
+            if is_streaming:
+                # For streaming requests, we need to use our proxy_stream method
+                # to avoid serialization issues with async generators
+                return StreamingResponse(
+                    self.proxy_stream(model_request, model_handle),
+                    media_type="text/event-stream",
+                )
+            else:
+                # For non-streaming requests, we can directly pass to the model
+                response = await model_handle.remote(model_request)
+                return JSONResponse(content=response)
 
         except Exception as e:
             logger.exception(f"Error handling chat completion request: {e}")
