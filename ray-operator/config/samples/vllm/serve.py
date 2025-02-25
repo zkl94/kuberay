@@ -1,63 +1,38 @@
 import os
-from typing import Dict, List, AsyncGenerator, Union, Any
+from typing import Dict, Optional, List, AsyncGenerator, Union, Any
 import logging
 import json
+import random
 import time
-import asyncio
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from starlette.requests import Request
-from starlette.responses import StreamingResponse, JSONResponse
+from starlette.responses import StreamingResponse, JSONResponse, Response
 
 from ray import serve
+from ray.serve.handle import DeploymentHandle
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
-# Set up proper logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ray.serve")
 
-# ==========================================================
-# Common Utility Functions
-# ==========================================================
+app = FastAPI()
+
+# Function to convert chat messages to prompt text
 
 
-def create_chat_completion_response(
-    request_id: str,
-    model_id: str,
-    content: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-) -> dict:
-    """Create a standardized chat completion response dictionary"""
-    return {
-        "id": request_id,
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model_id,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content
-                },
-                "finish_reason": "stop"
-            }
-        ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens
-        }
-    }
-
-# ==========================================================
-# Prompt Formatting Functions
-# ==========================================================
+def messages_to_prompt(messages: List[Dict[str, str]], model_id: str) -> str:
+    """Select the appropriate prompt format based on model ID"""
+    if "deepseek" in model_id.lower():
+        return deepseek_messages_to_prompt(messages)
+    elif "mistral" in model_id.lower():
+        return mistral_messages_to_prompt(messages)
+    else:
+        # Default format, can be extended as needed
+        return default_messages_to_prompt(messages)
 
 
 def deepseek_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
@@ -112,551 +87,351 @@ def mistral_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
 
     return prompt
 
-# ==========================================================
-# DeepSeek LLM Deployment
-# ==========================================================
 
-
-deepseek_app = FastAPI()
-
-
-@serve.deployment(name="DeepSeekDeployment")
-@serve.ingress(deepseek_app)
-class DeepSeekDeployment:
-    def __init__(self):
-        """Initialize the DeepSeek model"""
-        # Model configuration
-        self.model_id = "Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ"
-        self.friendly_name = "deepseek-qwen-32b"
-
-        # Engine configuration
-        engine_args = {
-            "model": self.model_id,
-            "tensor_parallel_size": 4,
-            "quantization": "awq",
-            "dtype": "half",
-            "gpu_memory_utilization": 0.90,
-            "max_model_len": 16384,
-            "max_num_seqs": 16,
-            "trust_remote_code": True,
-        }
-
-        # Fix for CUDA device visibility issue
-        if 'CUDA_VISIBLE_DEVICES' in os.environ:
-            del os.environ['CUDA_VISIBLE_DEVICES']
-
-        # Initialize the engine
-        logger.info(f"Initializing DeepSeek model: {self.model_id}")
-        args = AsyncEngineArgs(**engine_args)
-        self.engine = AsyncLLMEngine.from_engine_args(args)
-        logger.info(f"DeepSeek model {self.model_id} initialized successfully")
-
-        # Set reasonable timeout
-        self.request_timeout = 300  # 5 minutes
-
-    async def abort_request_on_disconnect(self, request_id: str) -> None:
-        """Abort request when client disconnects"""
-        try:
-            logger.info(
-                f"Aborting request {request_id} due to client disconnect")
-            await self.engine.abort(request_id)
-        except Exception as e:
-            logger.error(f"Error aborting request {request_id}: {e}")
-
-    async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
-        """Generate streaming chat completion response"""
-        try:
-            # First chunk with assistant role
-            chunk = {
-                "id": random_uuid(),
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant"},
-                        "finish_reason": None
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-
-            # Stream content chunks
-            previous_text = ""
-            async for request_output in request_output_generator:
-                if len(request_output.outputs) == 0:
-                    continue
-
-                # Get the new delta text (only what's new since last chunk)
-                current_text = request_output.outputs[0].text
-                delta_text = current_text[len(previous_text):]
-                previous_text = current_text
-
-                # Only send non-empty chunks
-                if delta_text:
-                    chunk = {
-                        "id": random_uuid(),
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model_id,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": delta_text},
-                                "finish_reason": None
-                            }
-                        ]
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
-
-                    # Add a small sleep to avoid overwhelming the client
-                    await asyncio.sleep(0.01)
-
-            # Final chunk signaling completion
-            chunk = {
-                "id": random_uuid(),
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        except Exception as e:
-            logger.exception(f"Error in streaming: {str(e)}")
-            error_chunk = {
-                "error": {
-                    "message": f"Streaming error: {str(e)}",
-                    "type": "server_error",
-                    "code": 500
-                }
-            }
-            yield f"data: {json.dumps(error_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-
-    @deepseek_app.get("/models")
-    async def list_models(self):
-        """List available models, compatible with OpenAI API"""
-        return {
-            "data": [
-                {
-                    "id": self.friendly_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "kuberay-user",
-                }
-            ],
-            "object": "list"
-        }
-
-    @deepseek_app.post("/chat/completions")
-    async def create_chat_completion(self, request: Request):
-        """Create chat completion API, compatible with OpenAI API"""
-        try:
-            request_dict = await request.json()
-            request_id = random_uuid()
-
-            # Extract messages from request
-            messages = request_dict.get("messages", [])
-            if not messages:
-                raise HTTPException(
-                    status_code=400, detail="Messages array cannot be empty")
-
-            # Convert messages to prompt text
-            prompt = deepseek_messages_to_prompt(messages)
-
-            # Extract sampling parameters
-            sampling_params = SamplingParams(
-                temperature=request_dict.get("temperature", 0.7),
-                top_p=request_dict.get("top_p", 0.9),
-                max_tokens=min(request_dict.get("max_tokens", 1024), 4096),
-                stop=request_dict.get("stop"),
-                frequency_penalty=request_dict.get("frequency_penalty", 0.0),
-                presence_penalty=request_dict.get("presence_penalty", 0.0),
-            )
-
-            # Check if streaming is requested
-            stream = request_dict.get("stream", False)
-
-            # Get generation results
-            results_generator = self.engine.generate(
-                prompt, sampling_params, request_id)
-
-            if stream:
-                # Return streaming response
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(
-                    self.abort_request_on_disconnect, request_id)
-
-                return StreamingResponse(
-                    self.stream_chat_response(
-                        results_generator, self.friendly_name),
-                    media_type="text/event-stream",
-                    background=background_tasks,
-                )
-
-            # Non-streaming response
-            final_output = None
-            async for request_output in results_generator:
-                final_output = request_output
-
-            if not final_output or not final_output.outputs:
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": {
-                            "message": "Failed to generate text",
-                            "type": "server_error",
-                            "code": 500
-                        }
-                    }
-                )
-
-            generated_text = final_output.outputs[0].text
-
-            # Calculate token usage
-            prompt_tokens = len(final_output.prompt_token_ids)
-            completion_tokens = len(
-                final_output.outputs[0].token_ids) if final_output.outputs else 0
-
-            # Create and return complete response
-            response = create_chat_completion_response(
-                request_id=request_id,
-                model_id=self.friendly_name,
-                content=generated_text,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-
-            return JSONResponse(content=response)
-
-        except Exception as e:
-            logger.exception(f"Error processing request: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": {
-                        "message": str(e),
-                        "type": "server_error",
-                        "code": 500
-                    }
-                }
-            )
-
-    @deepseek_app.get("/health")
-    async def health_check(self):
-        """Health check endpoint"""
-        return {"status": "healthy", "model": self.friendly_name}
-
-# ==========================================================
-# Mistral LLM Deployment
-# ==========================================================
-
-
-mistral_app = FastAPI()
-
-
-@serve.deployment(name="MistralDeployment")
-@serve.ingress(mistral_app)
-class MistralDeployment:
-    def __init__(self):
-        """Initialize the Mistral model"""
-        # Model configuration
-        self.model_id = "casperhansen/mistral-small-24b-instruct-2501-awq"
-        self.friendly_name = "mistral-small-24b"
-
-        # Engine configuration
-        engine_args = {
-            "model": self.model_id,
-            "tensor_parallel_size": 2,
-            "quantization": "awq",
-            "dtype": "half",
-            "gpu_memory_utilization": 0.90,
-            "max_model_len": 16384,
-            "max_num_seqs": 16,
-            "trust_remote_code": True,
-        }
-
-        # Fix for CUDA device visibility issue
-        if 'CUDA_VISIBLE_DEVICES' in os.environ:
-            del os.environ['CUDA_VISIBLE_DEVICES']
-
-        # Initialize the engine
-        logger.info(f"Initializing Mistral model: {self.model_id}")
-        args = AsyncEngineArgs(**engine_args)
-        self.engine = AsyncLLMEngine.from_engine_args(args)
-        logger.info(f"Mistral model {self.model_id} initialized successfully")
-
-        # Set reasonable timeout
-        self.request_timeout = 300  # 5 minutes
-
-    async def abort_request_on_disconnect(self, request_id: str) -> None:
-        """Abort request when client disconnects"""
-        try:
-            logger.info(
-                f"Aborting request {request_id} due to client disconnect")
-            await self.engine.abort(request_id)
-        except Exception as e:
-            logger.error(f"Error aborting request {request_id}: {e}")
-
-    async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
-        """Generate streaming chat completion response"""
-        try:
-            # First chunk with assistant role
-            chunk = {
-                "id": random_uuid(),
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant"},
-                        "finish_reason": None
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-
-            # Stream content chunks
-            previous_text = ""
-            async for request_output in request_output_generator:
-                if len(request_output.outputs) == 0:
-                    continue
-
-                # Get the new delta text (only what's new since last chunk)
-                current_text = request_output.outputs[0].text
-                delta_text = current_text[len(previous_text):]
-                previous_text = current_text
-
-                # Only send non-empty chunks
-                if delta_text:
-                    chunk = {
-                        "id": random_uuid(),
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model_id,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": delta_text},
-                                "finish_reason": None
-                            }
-                        ]
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
-
-                    # Add a small sleep to avoid overwhelming the client
-                    await asyncio.sleep(0.01)
-
-            # Final chunk signaling completion
-            chunk = {
-                "id": random_uuid(),
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        except Exception as e:
-            logger.exception(f"Error in streaming: {str(e)}")
-            error_chunk = {
-                "error": {
-                    "message": f"Streaming error: {str(e)}",
-                    "type": "server_error",
-                    "code": 500
-                }
-            }
-            yield f"data: {json.dumps(error_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-
-    @mistral_app.get("/models")
-    async def list_models(self):
-        """List available models, compatible with OpenAI API"""
-        return {
-            "data": [
-                {
-                    "id": self.friendly_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "kuberay-user",
-                }
-            ],
-            "object": "list"
-        }
-
-    @mistral_app.post("/chat/completions")
-    async def create_chat_completion(self, request: Request):
-        """Create chat completion API, compatible with OpenAI API"""
-        try:
-            request_dict = await request.json()
-            request_id = random_uuid()
-
-            # Extract messages from request
-            messages = request_dict.get("messages", [])
-            if not messages:
-                raise HTTPException(
-                    status_code=400, detail="Messages array cannot be empty")
-
-            # Convert messages to prompt text
-            prompt = mistral_messages_to_prompt(messages)
-
-            # Extract sampling parameters
-            sampling_params = SamplingParams(
-                temperature=request_dict.get("temperature", 0.7),
-                top_p=request_dict.get("top_p", 0.9),
-                max_tokens=min(request_dict.get("max_tokens", 1024), 4096),
-                stop=request_dict.get("stop"),
-                frequency_penalty=request_dict.get("frequency_penalty", 0.0),
-                presence_penalty=request_dict.get("presence_penalty", 0.0),
-            )
-
-            # Check if streaming is requested
-            stream = request_dict.get("stream", False)
-
-            # Get generation results
-            results_generator = self.engine.generate(
-                prompt, sampling_params, request_id)
-
-            if stream:
-                # Return streaming response
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(
-                    self.abort_request_on_disconnect, request_id)
-
-                return StreamingResponse(
-                    self.stream_chat_response(
-                        results_generator, self.friendly_name),
-                    media_type="text/event-stream",
-                    background=background_tasks,
-                )
-
-            # Non-streaming response
-            final_output = None
-            async for request_output in results_generator:
-                final_output = request_output
-
-            if not final_output or not final_output.outputs:
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": {
-                            "message": "Failed to generate text",
-                            "type": "server_error",
-                            "code": 500
-                        }
-                    }
-                )
-
-            generated_text = final_output.outputs[0].text
-
-            # Calculate token usage
-            prompt_tokens = len(final_output.prompt_token_ids)
-            completion_tokens = len(
-                final_output.outputs[0].token_ids) if final_output.outputs else 0
-
-            # Create and return complete response
-            response = create_chat_completion_response(
-                request_id=request_id,
-                model_id=self.friendly_name,
-                content=generated_text,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-
-            return JSONResponse(content=response)
-
-        except Exception as e:
-            logger.exception(f"Error processing request: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": {
-                        "message": str(e),
-                        "type": "server_error",
-                        "code": 500
-                    }
-                }
-            )
-
-    @mistral_app.get("/health")
-    async def health_check(self):
-        """Health check endpoint"""
-        return {"status": "healthy", "model": self.friendly_name}
-
-# ==========================================================
-# Root API App for Model Discovery (Optional)
-# ==========================================================
-
-
-root_app = FastAPI()
-
-
-@serve.deployment(name="ModelDiscovery")
-@serve.ingress(root_app)
-class ModelDiscovery:
-    @root_app.get("/v1/models")
-    async def list_all_models(self):
-        """List all available models across deployments"""
-        return {
-            "data": [
-                {
-                    "id": "deepseek-qwen-32b",
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "kuberay-user",
+def default_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
+    """Generic chat message formatting"""
+    prompt = ""
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+        prompt += f"{role.capitalize()}: {content}\n"
+    prompt += "Assistant: "
+    return prompt
+
+# Helper to create a chat completion response
+
+
+def create_chat_completion_response(
+    request_id: str,
+    model_id: str,
+    content: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> dict:
+    """Create a standardized chat completion response dictionary"""
+    return {
+        "id": request_id,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_id,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content
                 },
-                {
-                    "id": "mistral-small-24b",
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "kuberay-user",
-                }
-            ],
-            "object": "list"
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
         }
+    }
 
-    @root_app.get("/health")
+
+@serve.deployment(name="VLLMDeployment")
+class VLLMDeployment:
+    def __init__(self, **kwargs):
+        """
+        Construct a VLLM deployment.
+
+        For full parameter list, see:
+        https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
+        """
+        self.model_id = kwargs.get("model")
+        args = AsyncEngineArgs(**kwargs)
+        # Fix for CUDA device visibility issue
+        # https://github.com/vllm-project/vllm/issues/8402#issuecomment-2489432973
+        if 'CUDA_VISIBLE_DEVICES' in os.environ:
+            del os.environ['CUDA_VISIBLE_DEVICES']
+        self.engine = AsyncLLMEngine.from_engine_args(args)
+
+    async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
+        """Generate streaming chat completion response"""
+        # First chunk with assistant role
+        chunk = {
+            "id": random_uuid(),
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None
+                }
+            ]
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+
+        # Stream content chunks
+        async for request_output in request_output_generator:
+            if len(request_output.outputs) == 0:
+                continue
+
+            delta_text = request_output.outputs[0].text
+            chunk = {
+                "id": random_uuid(),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model_id,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": delta_text},
+                        "finish_reason": None
+                    }
+                ]
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+        # Final chunk signaling completion
+        chunk = {
+            "id": random_uuid(),
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }
+            ]
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def abort_request_on_disconnect(self, request_id: str) -> None:
+        """Abort request when client disconnects"""
+        try:
+            await self.engine.abort(request_id)
+        except Exception as e:
+            logger.error(f"Error aborting request {request_id}: {e}")
+
+    async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, StreamingResponse]:
+        """Process a chat completion request"""
+        request_id = random_uuid()
+
+        # Extract messages from request
+        messages = request.get("messages", [])
+        if not messages:
+            raise ValueError("Messages array cannot be empty")
+
+        # Convert messages to prompt text
+        prompt = messages_to_prompt(messages, model_id)
+
+        # Extract sampling parameters
+        sampling_params = SamplingParams(
+            temperature=request.get("temperature", 1.0),
+            top_p=request.get("top_p", 1.0),
+            max_tokens=request.get("max_tokens", 1024),
+            stop=request.get("stop"),
+            frequency_penalty=request.get("frequency_penalty", 0.0),
+            presence_penalty=request.get("presence_penalty", 0.0),
+        )
+
+        # Check if streaming is requested
+        stream = request.get("stream", False)
+
+        # Get generation results
+        results_generator = self.engine.generate(
+            prompt, sampling_params, request_id)
+
+        if stream:
+            # Return streaming response
+            background_tasks = BackgroundTasks()
+            background_tasks.add_task(
+                self.abort_request_on_disconnect, request_id)
+            return StreamingResponse(
+                self.stream_chat_response(results_generator, model_id),
+                media_type="text/event-stream",
+                background=background_tasks,
+            )
+
+        # Non-streaming response
+        final_output = None
+        async for request_output in results_generator:
+            final_output = request_output
+
+        if not final_output or not final_output.outputs:
+            return {
+                "error": {
+                    "message": "Failed to generate text",
+                    "type": "server_error",
+                    "code": 500
+                }
+            }
+
+        generated_text = final_output.outputs[0].text
+
+        # Calculate token usage
+        prompt_tokens = len(final_output.prompt_token_ids)
+        completion_tokens = len(
+            final_output.outputs[0].token_ids) if final_output.outputs else 0
+
+        # Create and return complete response
+        return create_chat_completion_response(
+            request_id=request_id,
+            model_id=model_id,
+            content=generated_text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
+    async def __call__(self, request_dict: dict) -> Any:
+        """Handle API requests"""
+        try:
+            response = await self.handle_chat_request(request_dict, self.model_id)
+
+            # If response is already a StreamingResponse, return it directly
+            if isinstance(response, StreamingResponse):
+                return response
+
+            # Otherwise return a JSON response
+            return JSONResponse(content=response)
+
+        except Exception as e:
+            logger.exception(f"Error processing request: {e}")
+            error_response = {
+                "error": {
+                    "message": str(e),
+                    "type": "invalid_request_error",
+                    "code": 400
+                }
+            }
+            return JSONResponse(content=error_response, status_code=400)
+
+
+@serve.deployment
+@serve.ingress(app)
+class MultiModelDeployment:
+    def __init__(self, models: Dict[str, DeploymentHandle]):
+        self.models = models
+        # Create mapping from model IDs to friendly names
+        self.model_id_to_name = {
+            "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ": "deepseek-r1-70b",
+            "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ": "mistral-small-24b",
+        }
+        # Reverse mapping for lookups
+        self.name_to_model_id = {v: k for k,
+                                 v in self.model_id_to_name.items()}
+
+    @app.get("/v1/models")
+    async def list_models(self):
+        """List available models, compatible with OpenAI API"""
+        available_models = []
+        for model_id in self.models.keys():
+            model_name = self.model_id_to_name.get(model_id, model_id)
+            available_models.append({
+                "id": model_name,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "kuberay-user",
+            })
+        return {"data": available_models, "object": "list"}
+
+    @app.post("/v1/chat/completions")
+    async def create_chat_completion(self, request: Request):
+        """Create chat completion, compatible with OpenAI API"""
+        try:
+            model_request = await request.json()
+
+            # Get model ID from request
+            requested_model = model_request.get("model", "")
+
+            # Get model ID from header, which takes precedence
+            header_model_id = request.headers.get("Model-ID")
+
+            # Decide which model to use
+            if header_model_id and header_model_id in self.models:
+                model_id = header_model_id
+            elif requested_model in self.name_to_model_id:
+                # Convert friendly name to full ID
+                model_id = self.name_to_model_id[requested_model]
+            elif requested_model in self.models:
+                # User provided the full ID directly
+                model_id = requested_model
+            elif not header_model_id and not requested_model:
+                # No model specified, choose randomly
+                model_id = random.choice(list(self.models.keys()))
+            else:
+                # Invalid model ID
+                error_message = {
+                    "error": {
+                        "message": f"Model '{requested_model or header_model_id}' not found",
+                        "type": "invalid_request_error",
+                        "code": "model_not_found",
+                    }
+                }
+                return JSONResponse(status_code=404, content=error_message)
+
+            logger.info(f"Using model ID: {model_id}")
+            model_handle = self.models[model_id]
+
+            # Pass request to the appropriate model handler
+            response = await model_handle.remote(model_request)
+
+            # Pass through the response
+            return response
+
+        except Exception as e:
+            logger.exception(f"Error handling chat completion request: {e}")
+            error_response = {
+                "error": {
+                    "message": str(e),
+                    "type": "internal_server_error",
+                    "code": 500,
+                }
+            }
+            return JSONResponse(status_code=500, content=error_response)
+
+    @app.get("/health")
     async def health_check(self):
-        """Root health check endpoint"""
-        return {"status": "healthy", "service": "llm-cluster"}
-
-# ==========================================================
-# Build Application Function for Ray Serve
-# ==========================================================
+        """Health check endpoint"""
+        return {"status": "healthy"}
 
 
-def build_app(args: dict = None):
-    """Build and return deployments for Ray Serve
+def build_app() -> serve.Application:
+    """Build a Serve application with multiple models."""
 
-    Args:
-        args: A dictionary of arguments from Ray Serve (required parameter)
+    models_handles = {}
 
-    Returns:
-        A list of Ray Serve deployments
-    """
-    # Create model deployments
-    deepseek_deployment = DeepSeekDeployment.bind()
-    mistral_deployment = MistralDeployment.bind()
+    # Model 1: DeepSeek
+    model_1_id = "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ"
+    model_1_kwargs = {
+        "model": model_1_id,
+        "tensor_parallel_size": 4,
+        "quantization": "awq",
+        "dtype": "half",  # Use FP16 for faster inference
+        "gpu_memory_utilization": 0.95,  # Control GPU memory usage
+        "max_model_len": 80960,  # Maximum token length
+        "max_num_seqs": 32,  # Maximum sequences per iteration
+        "trust_remote_code": True,  # Trust remote code if needed by model
+    }
+    models_handles[model_1_id] = VLLMDeployment.options(
+        ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
 
-    # The model discovery deployment is optional but useful for service discovery
-    discovery_deployment = ModelDiscovery.bind()
+    # Model 2: Mistral
+    model_2_id = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
+    model_2_kwargs = {
+        "model": model_2_id,
+        "tensor_parallel_size": 2,
+        "quantization": "awq",
+        "dtype": "half",
+        "gpu_memory_utilization": 0.95,
+        "max_num_seqs": 32,
+        "trust_remote_code": True,
+    }
+    models_handles[model_2_id] = VLLMDeployment.options(
+        ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_2_kwargs)
 
-    # Return all deployments in a list
-    return [deepseek_deployment, mistral_deployment, discovery_deployment]
+    # Create and return multi-model deployment
+    return MultiModelDeployment.bind(models_handles)
+
+
+# Application exposed in Ray Serve
+multi_model = build_app()
