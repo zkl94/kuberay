@@ -4,10 +4,12 @@ import logging
 import json
 import random
 import time
+import asyncio
 
 from fastapi import FastAPI, BackgroundTasks
 from starlette.requests import Request
 from starlette.responses import StreamingResponse, JSONResponse, Response
+from starlette.background import BackgroundTask
 
 from ray import serve
 from ray.serve.handle import DeploymentHandle
@@ -132,6 +134,22 @@ def create_chat_completion_response(
     }
 
 
+class AsyncIteratorWrapper:
+    """Helper class to wrap async generators for streaming responses."""
+
+    def __init__(self, aiter):
+        self.aiter = aiter
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return await self.aiter.__anext__()
+        except StopAsyncIteration:
+            raise StopAsyncIteration
+
+
 @serve.deployment(name="VLLMDeployment")
 class VLLMDeployment:
     def __init__(self, **kwargs):
@@ -149,8 +167,8 @@ class VLLMDeployment:
             del os.environ['CUDA_VISIBLE_DEVICES']
         self.engine = AsyncLLMEngine.from_engine_args(args)
 
-    async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
-        """Generate streaming chat completion response"""
+    async def generate_stream_chunks(self, request_output_generator, model_id: str):
+        """Generate streaming chat completion response chunks directly as strings."""
         # First chunk with assistant role
         chunk = {
             "id": random_uuid(),
@@ -212,7 +230,7 @@ class VLLMDeployment:
         except Exception as e:
             logger.error(f"Error aborting request {request_id}: {e}")
 
-    async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, StreamingResponse]:
+    async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, List[str]]:
         """Process a chat completion request"""
         request_id = random_uuid()
 
@@ -242,15 +260,9 @@ class VLLMDeployment:
             prompt, sampling_params, request_id)
 
         if stream:
-            # Return streaming response
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(
-                self.abort_request_on_disconnect, request_id)
-            return StreamingResponse(
-                self.stream_chat_response(results_generator, model_id),
-                media_type="text/event-stream",
-                background=background_tasks,
-            )
+            # For streaming, return a flag and the generator
+            # This will be handled specially in the caller
+            return {"stream": True, "generator": results_generator, "model_id": model_id}
 
         # Non-streaming response
         final_output = None
@@ -287,8 +299,9 @@ class VLLMDeployment:
         try:
             response = await self.handle_chat_request(request_dict, self.model_id)
 
-            # If response is already a StreamingResponse, return it directly
-            if isinstance(response, StreamingResponse):
+            # Handle the streaming case differently
+            if isinstance(response, dict) and response.get("stream") is True:
+                # Return a special flag that will be handled by the MultiModelDeployment
                 return response
 
             # Otherwise return a JSON response
@@ -372,11 +385,48 @@ class MultiModelDeployment:
             logger.info(f"Using model ID: {model_id}")
             model_handle = self.models[model_id]
 
-            # Pass request to the appropriate model handler
-            response = await model_handle.remote(model_request)
+            # Check if this is a streaming request
+            is_stream = model_request.get("stream", False)
+            if is_stream:
+                # If it's a streaming request, we need special handling
+                async def stream_generator():
+                    # Get response from the model
+                    model_response = await model_handle.remote(model_request)
 
-            # Pass through the response
-            return response
+                    # Check if we received a streaming response
+                    if isinstance(model_response, dict) and model_response.get("stream") is True:
+                        # Extract the generator and model_id
+                        results_generator = model_response["generator"]
+                        response_model_id = model_response["model_id"]
+
+                        # Create a new VLLMDeployment instance just for generating stream chunks
+                        # This avoids serializing the generator across Ray boundaries
+                        vllm_instance = VLLMDeployment(
+                            model="dummy")  # Create a dummy instance
+
+                        # Use the instance to generate stream chunks
+                        async for chunk in vllm_instance.generate_stream_chunks(results_generator, response_model_id):
+                            yield chunk
+                    else:
+                        # If we didn't get a streaming response, return an error
+                        error_chunk = {
+                            "error": {
+                                "message": "Failed to create streaming response",
+                                "type": "server_error"
+                            }
+                        }
+                        yield f"data: {json.dumps(error_chunk)}\n\n"
+                        yield "data: [DONE]\n\n"
+
+                # Return the streaming response
+                return StreamingResponse(
+                    stream_generator(),
+                    media_type="text/event-stream"
+                )
+            else:
+                # For non-streaming requests, just pass through the response
+                response = await model_handle.remote(model_request)
+                return response
 
         except Exception as e:
             logger.exception(f"Error handling chat completion request: {e}")
