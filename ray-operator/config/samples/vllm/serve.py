@@ -152,6 +152,7 @@ class VLLMDeployment:
     async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
         """Generate streaming chat completion response"""
         # First chunk with assistant role
+        print("First chunk")
         chunk = {
             "id": random_uuid(),
             "object": "chat.completion.chunk",
@@ -167,6 +168,7 @@ class VLLMDeployment:
         }
         yield f"data: {json.dumps(chunk)}\n\n"
 
+        print("Streaming chunks")
         # Stream content chunks
         previous_text = ""
         async for request_output in request_output_generator:
@@ -250,9 +252,11 @@ class VLLMDeployment:
 
         if stream:
             # Return streaming response
+            print("Streaming response")
             background_tasks = BackgroundTasks()
             background_tasks.add_task(
                 self.abort_request_on_disconnect, request_id)
+            print("Background tasks added")
             return StreamingResponse(
                 self.stream_chat_response(results_generator, model_id),
                 media_type="text/event-stream",
@@ -346,6 +350,7 @@ class MultiModelDeployment:
         """Create chat completion, compatible with OpenAI API"""
         try:
             model_request = await request.json()
+            print(type(model_request))
 
             # Get model ID from request
             requested_model = model_request.get("model", "")
