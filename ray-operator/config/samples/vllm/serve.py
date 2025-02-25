@@ -425,7 +425,6 @@ def build_app() -> serve.Application:
         "quantization": os.environ.get('MODEL_2_QUANTIZE', "awq"),
         "dtype": "half",
         "gpu_memory_utilization": 0.95,
-        "max_model_len": 80960,
         "max_num_seqs": 32,
         "trust_remote_code": True,
     }
