@@ -22,6 +22,8 @@ logger = logging.getLogger("ray.serve")
 app = FastAPI()
 
 # Function to convert chat messages to prompt text
+
+
 def messages_to_prompt(messages: List[Dict[str, str]], model_id: str) -> str:
     """Select the appropriate prompt format based on model ID"""
     if "deepseek" in model_id.lower():
@@ -31,6 +33,7 @@ def messages_to_prompt(messages: List[Dict[str, str]], model_id: str) -> str:
     else:
         # Default format, can be extended as needed
         return default_messages_to_prompt(messages)
+
 
 def deepseek_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     """Format chat messages for DeepSeek models"""
@@ -49,22 +52,23 @@ def deepseek_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     prompt += "Assistant: "
     return prompt
 
+
 def mistral_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     """Format chat messages for Mistral models"""
     prompt = ""
     system_message = ""
-    
+
     # Extract system message
     for message in messages:
         if message["role"] == "system":
             system_message += message["content"] + "\n"
-    
+
     # Add system message to prompt beginning
     if system_message:
         prompt = f"<s>[INST] {system_message}\n"
     else:
         prompt = "<s>[INST] "
-    
+
     # Add user and assistant messages
     for i, message in enumerate(messages):
         if message["role"] == "system":
@@ -76,12 +80,13 @@ def mistral_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
                 prompt += message["content"]
         elif message["role"] == "assistant":
             prompt += f" [/INST]\n\n{message['content']}\n\n"
-    
+
     # Make sure prompt ends with user message for assistant's response
     if messages[-1]["role"] == "user":
         prompt += " [/INST]\n\n"
-    
+
     return prompt
+
 
 def default_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     """Generic chat message formatting"""
@@ -94,6 +99,8 @@ def default_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     return prompt
 
 # Helper to create a chat completion response
+
+
 def create_chat_completion_response(
     request_id: str,
     model_id: str,
@@ -124,12 +131,13 @@ def create_chat_completion_response(
         }
     }
 
+
 @serve.deployment(name="VLLMDeployment")
 class VLLMDeployment:
     def __init__(self, **kwargs):
         """
         Construct a VLLM deployment.
-        
+
         For full parameter list, see:
         https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
         """
@@ -163,7 +171,7 @@ class VLLMDeployment:
         async for request_output in request_output_generator:
             if len(request_output.outputs) == 0:
                 continue
-                
+
             delta_text = request_output.outputs[0].text
             chunk = {
                 "id": random_uuid(),
@@ -207,15 +215,15 @@ class VLLMDeployment:
     async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, StreamingResponse]:
         """Process a chat completion request"""
         request_id = random_uuid()
-        
+
         # Extract messages from request
         messages = request.get("messages", [])
         if not messages:
             raise ValueError("Messages array cannot be empty")
-        
+
         # Convert messages to prompt text
         prompt = messages_to_prompt(messages, model_id)
-        
+
         # Extract sampling parameters
         sampling_params = SamplingParams(
             temperature=request.get("temperature", 1.0),
@@ -225,28 +233,30 @@ class VLLMDeployment:
             frequency_penalty=request.get("frequency_penalty", 0.0),
             presence_penalty=request.get("presence_penalty", 0.0),
         )
-        
+
         # Check if streaming is requested
         stream = request.get("stream", False)
-        
+
         # Get generation results
-        results_generator = self.engine.generate(prompt, sampling_params, request_id)
-        
+        results_generator = self.engine.generate(
+            prompt, sampling_params, request_id)
+
         if stream:
             # Return streaming response
             background_tasks = BackgroundTasks()
-            background_tasks.add_task(self.abort_request_on_disconnect, request_id)
+            background_tasks.add_task(
+                self.abort_request_on_disconnect, request_id)
             return StreamingResponse(
                 self.stream_chat_response(results_generator, model_id),
                 media_type="text/event-stream",
                 background=background_tasks,
             )
-        
+
         # Non-streaming response
         final_output = None
         async for request_output in results_generator:
             final_output = request_output
-            
+
         if not final_output or not final_output.outputs:
             return {
                 "error": {
@@ -255,13 +265,14 @@ class VLLMDeployment:
                     "code": 500
                 }
             }
-            
+
         generated_text = final_output.outputs[0].text
-        
+
         # Calculate token usage
         prompt_tokens = len(final_output.prompt_token_ids)
-        completion_tokens = len(final_output.outputs[0].token_ids) if final_output.outputs else 0
-        
+        completion_tokens = len(
+            final_output.outputs[0].token_ids) if final_output.outputs else 0
+
         # Create and return complete response
         return create_chat_completion_response(
             request_id=request_id,
@@ -270,19 +281,19 @@ class VLLMDeployment:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
-    
+
     async def __call__(self, request_dict: dict) -> Any:
         """Handle API requests"""
         try:
             response = await self.handle_chat_request(request_dict, self.model_id)
-            
+
             # If response is already a StreamingResponse, return it directly
             if isinstance(response, StreamingResponse):
                 return response
-                
+
             # Otherwise return a JSON response
             return JSONResponse(content=response)
-            
+
         except Exception as e:
             logger.exception(f"Error processing request: {e}")
             error_response = {
@@ -306,7 +317,8 @@ class MultiModelDeployment:
             "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ": "mistral-small-24b",
         }
         # Reverse mapping for lookups
-        self.name_to_model_id = {v: k for k, v in self.model_id_to_name.items()}
+        self.name_to_model_id = {v: k for k,
+                                 v in self.model_id_to_name.items()}
 
     @app.get("/v1/models")
     async def list_models(self):
@@ -327,13 +339,13 @@ class MultiModelDeployment:
         """Create chat completion, compatible with OpenAI API"""
         try:
             model_request = await request.json()
-            
+
             # Get model ID from request
             requested_model = model_request.get("model", "")
-            
+
             # Get model ID from header, which takes precedence
             header_model_id = request.headers.get("Model-ID")
-            
+
             # Decide which model to use
             if header_model_id and header_model_id in self.models:
                 model_id = header_model_id
@@ -356,16 +368,16 @@ class MultiModelDeployment:
                     }
                 }
                 return JSONResponse(status_code=404, content=error_message)
-            
+
             logger.info(f"Using model ID: {model_id}")
             model_handle = self.models[model_id]
-            
+
             # Pass request to the appropriate model handler
             response = await model_handle.remote(model_request)
-            
+
             # Pass through the response
             return response
-            
+
         except Exception as e:
             logger.exception(f"Error handling chat completion request: {e}")
             error_response = {
@@ -389,11 +401,12 @@ def build_app() -> serve.Application:
     models_handles = {}
 
     # Model 1: DeepSeek
-    model_1_id = os.environ.get('MODEL_1_ID', "Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ")
+    model_1_id = os.environ.get(
+        'MODEL_1_ID', "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ")
     model_1_kwargs = {
         "model": model_1_id,
         "tensor_parallel_size": int(os.environ.get('MODEL_1_TENSOR_PARALLELISM', 4)),
-        "quantization": os.environ.get('MODEL_1_QUANTIZE', "awq_marlin"),
+        "quantization": os.environ.get('MODEL_1_QUANTIZE', "awq"),
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.85,  # Control GPU memory usage
         "max_num_seqs": 32,  # Maximum sequences per iteration
@@ -403,11 +416,12 @@ def build_app() -> serve.Application:
         ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
 
     # Model 2: Mistral
-    model_2_id = os.environ.get('MODEL_2_ID', "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ")
+    model_2_id = os.environ.get(
+        'MODEL_2_ID', "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ")
     model_2_kwargs = {
         "model": model_2_id,
         "tensor_parallel_size": int(os.environ.get('MODEL_2_TENSOR_PARALLELISM', 2)),
-        "quantization": os.environ.get('MODEL_2_QUANTIZE', "awq_marlin"),
+        "quantization": os.environ.get('MODEL_2_QUANTIZE', "awq"),
         "dtype": "half",
         "gpu_memory_utilization": 0.85,
         "max_num_seqs": 32,
