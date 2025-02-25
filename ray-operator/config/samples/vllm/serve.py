@@ -408,7 +408,8 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": int(os.environ.get('MODEL_1_TENSOR_PARALLELISM', 4)),
         "quantization": os.environ.get('MODEL_1_QUANTIZE', "awq"),
         "dtype": "half",  # Use FP16 for faster inference
-        "gpu_memory_utilization": 0.85,  # Control GPU memory usage
+        "gpu_memory_utilization": 0.95,  # Control GPU memory usage
+        "max_model_len": 80960,  # Maximum token length
         "max_num_seqs": 32,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
     }
@@ -423,7 +424,8 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": int(os.environ.get('MODEL_2_TENSOR_PARALLELISM', 2)),
         "quantization": os.environ.get('MODEL_2_QUANTIZE', "awq"),
         "dtype": "half",
-        "gpu_memory_utilization": 0.85,
+        "gpu_memory_utilization": 0.95,
+        "max_model_len": 80960,
         "max_num_seqs": 32,
         "trust_remote_code": True,
     }
