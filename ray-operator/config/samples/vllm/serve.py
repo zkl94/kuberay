@@ -601,7 +601,7 @@ class MistralDeployment:
         return {"status": "healthy", "model": self.friendly_name}
 
 # ==========================================================
-# Root FastAPI App for Model Discovery
+# Root API App for Model Discovery (Optional)
 # ==========================================================
 
 
@@ -642,12 +642,21 @@ class ModelDiscovery:
 # ==========================================================
 
 
-def build_app():
-    """Build and return deployments for Ray Serve"""
+def build_app(args: dict = None):
+    """Build and return deployments for Ray Serve
+
+    Args:
+        args: A dictionary of arguments from Ray Serve (required parameter)
+
+    Returns:
+        A list of Ray Serve deployments
+    """
     # Create model deployments
     deepseek_deployment = DeepSeekDeployment.bind()
     mistral_deployment = MistralDeployment.bind()
+
+    # The model discovery deployment is optional but useful for service discovery
     discovery_deployment = ModelDiscovery.bind()
 
-    # Return all deployments
+    # Return all deployments in a list
     return [deepseek_deployment, mistral_deployment, discovery_deployment]
