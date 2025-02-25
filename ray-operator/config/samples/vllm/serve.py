@@ -313,7 +313,7 @@ class MultiModelDeployment:
         self.models = models
         # Create mapping from model IDs to friendly names
         self.model_id_to_name = {
-            "Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ": "deepseek-r1-32b",
+            "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ": "deepseek-r1-70b",
             "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ": "mistral-small-24b",
         }
         # Reverse mapping for lookups
@@ -401,12 +401,11 @@ def build_app() -> serve.Application:
     models_handles = {}
 
     # Model 1: DeepSeek
-    model_1_id = os.environ.get(
-        'MODEL_1_ID', "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ")
+    model_1_id = "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ"
     model_1_kwargs = {
         "model": model_1_id,
-        "tensor_parallel_size": int(os.environ.get('MODEL_1_TENSOR_PARALLELISM', 4)),
-        "quantization": os.environ.get('MODEL_1_QUANTIZE', "awq"),
+        "tensor_parallel_size": 4,
+        "quantization": "awq",
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.95,  # Control GPU memory usage
         "max_model_len": 80960,  # Maximum token length
@@ -417,12 +416,11 @@ def build_app() -> serve.Application:
         ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
 
     # Model 2: Mistral
-    model_2_id = os.environ.get(
-        'MODEL_2_ID', "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ")
+    model_2_id = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
     model_2_kwargs = {
         "model": model_2_id,
-        "tensor_parallel_size": int(os.environ.get('MODEL_2_TENSOR_PARALLELISM', 2)),
-        "quantization": os.environ.get('MODEL_2_QUANTIZE', "awq"),
+        "tensor_parallel_size": 2,
+        "quantization": "awq",
         "dtype": "half",
         "gpu_memory_utilization": 0.95,
         "max_num_seqs": 32,
