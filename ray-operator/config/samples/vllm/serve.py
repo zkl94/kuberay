@@ -282,9 +282,10 @@ class VLLMDeployment:
             completion_tokens=completion_tokens,
         )
 
-    async def __call__(self, request_dict: dict) -> Any:
+    async def __call__(self, request: Request) -> Any:
         """Handle API requests"""
         try:
+            request_dict = await request.json()
             response = await self.handle_chat_request(request_dict, self.model_id)
 
             # If response is already a StreamingResponse, return it directly
@@ -373,7 +374,7 @@ class MultiModelDeployment:
             model_handle = self.models[model_id]
 
             # Pass request to the appropriate model handler
-            response = await model_handle.remote(model_request)
+            response = await model_handle.remote(request)
 
             # Pass through the response
             return response
@@ -407,7 +408,7 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": 4,
         "quantization": "awq",
         "dtype": "half",  # Use FP16 for faster inference
-        "gpu_memory_utilization": 0.95,  # Control GPU memory usage
+        "gpu_memory_utilization": 0.85,  # Control GPU memory usage
         "max_model_len": 80960,  # Maximum token length
         "max_num_seqs": 32,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
@@ -422,7 +423,7 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": 2,
         "quantization": "awq",
         "dtype": "half",
-        "gpu_memory_utilization": 0.95,
+        "gpu_memory_utilization": 0.85,
         "max_num_seqs": 32,
         "trust_remote_code": True,
     }
