@@ -39,6 +39,8 @@ logger = logging.getLogger("ray.serve")
 app = FastAPI()
 
 # 转换聊天消息为提示文本的函数
+
+
 def messages_to_prompt(messages: List[Dict[str, str]], model_id: str) -> str:
     """根据模型ID选择适当的提示格式转换函数"""
     if "deepseek" in model_id.lower():
@@ -48,6 +50,7 @@ def messages_to_prompt(messages: List[Dict[str, str]], model_id: str) -> str:
     else:
         # 默认格式，可根据需要扩展
         return default_messages_to_prompt(messages)
+
 
 def deepseek_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     """为DeepSeek模型格式化聊天消息"""
@@ -66,22 +69,23 @@ def deepseek_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     prompt += "Assistant: "
     return prompt
 
+
 def mistral_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     """为Mistral模型格式化聊天消息"""
     prompt = ""
     system_message = ""
-    
+
     # 提取系统消息
     for message in messages:
         if message["role"] == "system":
             system_message += message["content"] + "\n"
-    
+
     # 添加系统消息到提示前部
     if system_message:
         prompt = f"<s>[INST] {system_message}\n"
     else:
         prompt = "<s>[INST] "
-    
+
     # 添加用户和助手消息
     for i, message in enumerate(messages):
         if message["role"] == "system":
@@ -93,12 +97,13 @@ def mistral_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
                 prompt += message["content"]
         elif message["role"] == "assistant":
             prompt += f" [/INST]\n\n{message['content']}\n\n"
-    
+
     # 确保提示以用户消息结尾，并为助手添加响应前缀
     if messages[-1]["role"] == "user":
         prompt += " [/INST]\n\n"
-    
+
     return prompt
+
 
 def default_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     """通用聊天消息格式化"""
@@ -110,12 +115,13 @@ def default_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     prompt += "Assistant: "
     return prompt
 
+
 @serve.deployment(name="VLLMDeployment")
 class VLLMDeployment:
     def __init__(self, **kwargs):
         """
         构建一个VLLM部署。
-        
+
         详细参数请参考：https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
         """
         self.model_id = kwargs.get("model")
@@ -142,7 +148,7 @@ class VLLMDeployment:
         async for request_output in request_output_generator:
             if len(request_output.outputs) == 0:
                 continue
-                
+
             delta_text = request_output.outputs[0].text
             choice_data = ChatCompletionResponseStreamChoice(
                 index=0, delta=DeltaMessage(content=delta_text), finish_reason=None
@@ -173,27 +179,11 @@ class VLLMDeployment:
     async def handle_chat_request(self, request: ChatCompletionRequest, model_id: str) -> Union[ChatCompletionResponse, StreamingResponse]:
         """处理聊天完成请求"""
         request_id = random_uuid()
-        
+
         # 从请求中提取消息和参数
-        # 处理不同类型的消息对象
-        messages = []
-        for msg in request.messages:
-            if hasattr(msg, 'dict') and callable(msg.dict):
-                # 如果是Pydantic模型或有dict()方法的对象
-                messages.append(msg.dict())
-            elif isinstance(msg, dict):
-                # 如果已经是字典
-                messages.append(msg)
-            else:
-                # 尝试转换为字典
-                try:
-                    messages.append({"role": msg.role, "content": msg.content})
-                except AttributeError:
-                    logger.error(f"无法处理消息格式: {msg}")
-                    raise ValueError(f"消息格式无效: {msg}")
-        
+        messages = [msg.dict() for msg in request.messages]
         prompt = messages_to_prompt(messages, model_id)
-        
+
         # 提取采样参数
         sampling_params = SamplingParams(
             temperature=request.temperature,
@@ -203,20 +193,22 @@ class VLLMDeployment:
             frequency_penalty=getattr(request, "frequency_penalty", 0.0),
             presence_penalty=getattr(request, "presence_penalty", 0.0),
         )
-        
+
         # 获取生成结果
-        results_generator = self.engine.generate(prompt, sampling_params, request_id)
-        
+        results_generator = self.engine.generate(
+            prompt, sampling_params, request_id)
+
         if request.stream:
             # 返回流式响应
             background_tasks = BackgroundTasks()
-            background_tasks.add_task(self.abort_request_on_disconnect, request_id)
+            background_tasks.add_task(
+                self.abort_request_on_disconnect, request_id)
             return StreamingResponse(
                 self.stream_completion(results_generator, model_id),
                 media_type="text/event-stream",
                 background=background_tasks,
             )
-        
+
         # 非流式响应
         final_output = None
         async for request_output in results_generator:
@@ -224,20 +216,21 @@ class VLLMDeployment:
                 final_output = request_output
             else:
                 final_output = request_output
-                
+
         generated_text = final_output.outputs[0].text if final_output.outputs else ""
-        
+
         # 计算令牌用量
         prompt_tokens = final_output.prompt_token_ids.shape[0]
-        completion_tokens = len(final_output.outputs[0].token_ids) if final_output.outputs else 0
-        
+        completion_tokens = len(
+            final_output.outputs[0].token_ids) if final_output.outputs else 0
+
         # 构建响应
         choice = ChatCompletionResponseChoice(
             index=0,
             message=ChatMessage(role="assistant", content=generated_text),
             finish_reason="stop",
         )
-        
+
         return ChatCompletionResponse(
             id=request_id,
             model=model_id,
@@ -250,37 +243,25 @@ class VLLMDeployment:
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
-    
+
     async def abort_request_on_disconnect(self, request_id: str) -> None:
         """在客户端断开连接时中止请求"""
         await self.engine.abort(request_id)
-    
-    async def handle_prompt_request(self, prompt: str, params: dict, model_id: str) -> Union[Response, JSONResponse]:
-        """处理传统的单一prompt格式请求"""
-        request_id = random_uuid()
-        
-        # 提取采样参数
-        sampling_params = SamplingParams(
-            temperature=params.get("temperature", 1.0),
-            top_p=params.get("top_p", 1.0),
-            max_tokens=params.get("max_tokens", 1024),
-            stop=params.get("stop", None),
-            frequency_penalty=params.get("frequency_penalty", 0.0),
-            presence_penalty=params.get("presence_penalty", 0.0),
-        )
-        
-        stream = params.get("stream", False)
-        
-        # 获取生成结果
-        results_generator = self.engine.generate(prompt, sampling_params, request_id)
-        
-        if stream:
-            # 返回流式响应
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(self.abort_request_on_disconnect, request_id)
-            return StreamingResponse(
-                self.stream_completion(results_generator, model_id),
-                media_type="text/
+
+    async def __call__(self, request_dict: dict) -> Any:
+        """处理聊天完成API请求"""
+        try:
+            # 解析请求为ChatCompletionRequest对象
+            request = ChatCompletionRequest(**request_dict)
+            return await self.handle_chat_request(request, self.model_id)
+        except Exception as e:
+            logger.exception(f"处理请求时出错: {e}")
+            error_response = ErrorResponse(
+                message=str(e),
+                type="invalid_request_error",
+                code=400,
+            )
+            return JSONResponse(content=asdict(error_response), status_code=400)
 
 
 @serve.deployment
@@ -294,7 +275,8 @@ class MultiModelDeployment:
             "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ": "mistral-small-24b",
         }
         # 反向映射，方便查找
-        self.name_to_model_id = {v: k for k, v in self.model_id_to_name.items()}
+        self.name_to_model_id = {v: k for k,
+                                 v in self.model_id_to_name.items()}
 
     @app.get("/v1/models")
     async def list_models(self):
@@ -317,13 +299,13 @@ class MultiModelDeployment:
         """创建聊天完成，兼容OpenAI API"""
         try:
             model_request = await request.json()
-            
+
             # 从请求中获取模型ID
             requested_model = model_request.get("model", "")
-            
+
             # 从请求头获取模型ID，优先级高于请求中的model字段
             header_model_id = request.headers.get("Model-ID")
-            
+
             # 决定使用哪个模型
             if header_model_id and header_model_id in self.models:
                 model_id = header_model_id
@@ -346,31 +328,31 @@ class MultiModelDeployment:
                     }
                 }
                 return JSONResponse(status_code=404, content=error_message)
-            
+
             # 替换请求中的模型为内部模型ID，方便处理
             model_request["model"] = model_id
-            
+
             logger.info(f"使用模型ID: {model_id}")
             model_handle = self.models[model_id]
-            
+
             # 将请求传递给相应的模型处理
             response = await model_handle.remote(model_request)
-            
+
             # 如果是流式响应，直接返回
             if isinstance(response, StreamingResponse):
                 return response
-            
+
             # 转换响应格式，替换内部模型ID为用户友好名称
             if hasattr(response, "model") and response.model in self.model_id_to_name:
                 response.model = self.model_id_to_name[response.model]
-            
+
             # 将响应对象转换为dict
             if hasattr(response, "dict"):
                 response_dict = response.dict()
                 return JSONResponse(content=response_dict)
-            
+
             return JSONResponse(content=response)
-            
+
         except Exception as e:
             logger.exception(f"处理聊天完成请求时出错: {e}")
             error_response = {
@@ -394,7 +376,8 @@ def build_app() -> serve.Application:
     models_handles = {}
 
     # 模型1: DeepSeek
-    model_1_id = os.environ.get('MODEL_1_ID', "Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ")
+    model_1_id = os.environ.get(
+        'MODEL_1_ID', "Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ")
     model_1_kwargs = {
         "model": model_1_id,
         "tensor_parallel_size": int(os.environ.get('MODEL_1_TENSOR_PARALLELISM', 4)),
@@ -408,7 +391,8 @@ def build_app() -> serve.Application:
         ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
 
     # 模型2: Mistral
-    model_2_id = os.environ.get('MODEL_2_ID', "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ")
+    model_2_id = os.environ.get(
+        'MODEL_2_ID', "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ")
     model_2_kwargs = {
         "model": model_2_id,
         "tensor_parallel_size": int(os.environ.get('MODEL_2_TENSOR_PARALLELISM', 2)),
