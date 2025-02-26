@@ -589,9 +589,11 @@ class NLLBDeployment:
 
         # 设备检测
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
 
         # 编码输入文本
         inputs = self.tokenizer(text, return_tensors="pt").to(device)
+        print(f"Input tokens: {inputs}")
 
         # 生成翻译
         translated_tokens = self.model.generate(
@@ -600,10 +602,12 @@ class NLLBDeployment:
                 target_lang),
             max_length=512  # 可根据需要调整最大长度
         )
+        print(f"Translated tokens: {translated_tokens}")
 
         # 解码生成的文本
         translation = self.tokenizer.batch_decode(
             translated_tokens, skip_special_tokens=True)[0]
+        print(f"Translation: {translation}")
 
         return translation
 
