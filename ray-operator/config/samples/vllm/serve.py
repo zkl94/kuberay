@@ -243,14 +243,22 @@ class VLLMDeployment:
 
         if stream:
             # Return streaming response
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(
-                self.abort_request_on_disconnect, request_id)
-            return StreamingResponse(
-                self.stream_chat_response(results_generator, model_id),
-                media_type="text/event-stream",
-                background=background_tasks,
-            )
+            # background_tasks = BackgroundTasks()
+            # background_tasks.add_task(
+            #     self.abort_request_on_disconnect, request_id)
+            # return StreamingResponse(
+            #     self.stream_chat_response(results_generator, model_id),
+            #     media_type="text/event-stream",
+            #     background=background_tasks,
+            # )
+            return {
+                "stream": True,
+                "request_id": request_id,
+                "model_id": model_id,
+                # We can't pass the generator directly, so we'll handle generation in the ingress
+                "prompt": prompt,
+                "sampling_params": sampling_params
+            }
 
         # Non-streaming response
         final_output = None
@@ -286,6 +294,11 @@ class VLLMDeployment:
         """Handle API requests"""
         try:
             response = await self.handle_chat_request(request_dict, self.model_id)
+
+            # If we got back a streaming info dictionary
+            if isinstance(response, dict) and response.get("stream") is True:
+                # Return the dictionary with streaming info
+                return response
 
             # If response is already a StreamingResponse, return it directly
             if isinstance(response, StreamingResponse):
@@ -374,6 +387,37 @@ class MultiModelDeployment:
 
             # Pass request to the appropriate model handler
             response = await model_handle.remote(model_request)
+
+            # Check if this is a streaming response info dictionary
+            if isinstance(response, dict) and response.get("stream") is True:
+                # Extract information needed for streaming
+                request_id = response.get("request_id")
+                model_id = response.get("model_id")
+
+                # Get a direct reference to the model deployment for streaming
+                # This is necessary because we can't pass the generator through DeploymentHandle
+                model_deployment = model_handle._handle.deployment_actor
+
+                # Create a new generator directly from the model deployment
+                results_generator = await model_deployment.engine.generate.remote(
+                    response.get("prompt"),
+                    response.get("sampling_params"),
+                    request_id
+                )
+
+                # Create background tasks for cleanup
+                background_tasks = BackgroundTasks()
+                background_tasks.add_task(
+                    model_deployment.abort_request_on_disconnect.remote, request_id
+                )
+
+                # Create and return streaming response directly from the ingress
+                return StreamingResponse(
+                    model_deployment.stream_chat_response.remote(
+                        results_generator, model_id),
+                    media_type="text/event-stream",
+                    background=background_tasks,
+                )
 
             # Pass through the response
             return response
