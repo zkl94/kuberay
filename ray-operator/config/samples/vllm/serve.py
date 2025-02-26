@@ -282,10 +282,9 @@ class VLLMDeployment:
             completion_tokens=completion_tokens,
         )
 
-    async def __call__(self, request: Request) -> Any:
+    async def __call__(self, request_dict: dict) -> Any:
         """Handle API requests"""
         try:
-            request_dict = await request.json()
             response = await self.handle_chat_request(request_dict, self.model_id)
 
             # If response is already a StreamingResponse, return it directly
@@ -374,7 +373,7 @@ class MultiModelDeployment:
             model_handle = self.models[model_id]
 
             # Pass request to the appropriate model handler
-            response = await model_handle.remote(request)
+            response = await model_handle.remote(model_request)
 
             # Pass through the response
             return response
