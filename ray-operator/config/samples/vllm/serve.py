@@ -178,12 +178,32 @@ class VLLMDeployment:
         }
         yield f"data: {json.dumps(chunk)}\n\n"
 
+        # Track previously sent text to compute deltas
+        previous_text = ""
+
         # Stream content chunks
         async for request_output in results_generator:
             if len(request_output.outputs) == 0:
                 continue
 
-            delta_text = request_output.outputs[0].text
+            # Get the full text generated so far
+            current_text = request_output.outputs[0].text
+
+            # Compute the delta (only the new part)
+            if current_text.startswith(previous_text):
+                delta_text = current_text[len(previous_text):]
+            else:
+                # Fallback in case of text replacement (unlikely but possible)
+                delta_text = current_text
+
+            # Skip empty deltas
+            if not delta_text:
+                continue
+
+            # Update previous text for next iteration
+            previous_text = current_text
+
+            # Create the chunk with only the delta text
             chunk = {
                 "id": random_uuid(),
                 "object": "chat.completion.chunk",
@@ -216,61 +236,61 @@ class VLLMDeployment:
         yield f"data: {json.dumps(chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
-    async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
-        """Generate streaming chat completion response"""
-        # First chunk with assistant role
-        chunk = {
-            "id": random_uuid(),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model_id,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant"},
-                    "finish_reason": None
-                }
-            ]
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
+    # async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
+    #     """Generate streaming chat completion response"""
+    #     # First chunk with assistant role
+    #     chunk = {
+    #         "id": random_uuid(),
+    #         "object": "chat.completion.chunk",
+    #         "created": int(time.time()),
+    #         "model": model_id,
+    #         "choices": [
+    #             {
+    #                 "index": 0,
+    #                 "delta": {"role": "assistant"},
+    #                 "finish_reason": None
+    #             }
+    #         ]
+    #     }
+    #     yield f"data: {json.dumps(chunk)}\n\n"
 
-        # Stream content chunks
-        async for request_output in request_output_generator:
-            if len(request_output.outputs) == 0:
-                continue
+    #     # Stream content chunks
+    #     async for request_output in request_output_generator:
+    #         if len(request_output.outputs) == 0:
+    #             continue
 
-            delta_text = request_output.outputs[0].text
-            chunk = {
-                "id": random_uuid(),
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": delta_text},
-                        "finish_reason": None
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
+    #         delta_text = request_output.outputs[0].text
+    #         chunk = {
+    #             "id": random_uuid(),
+    #             "object": "chat.completion.chunk",
+    #             "created": int(time.time()),
+    #             "model": model_id,
+    #             "choices": [
+    #                 {
+    #                     "index": 0,
+    #                     "delta": {"content": delta_text},
+    #                     "finish_reason": None
+    #                 }
+    #             ]
+    #         }
+    #         yield f"data: {json.dumps(chunk)}\n\n"
 
-        # Final chunk signaling completion
-        chunk = {
-            "id": random_uuid(),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model_id,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop"
-                }
-            ]
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
-        yield "data: [DONE]\n\n"
+    #     # Final chunk signaling completion
+    #     chunk = {
+    #         "id": random_uuid(),
+    #         "object": "chat.completion.chunk",
+    #         "created": int(time.time()),
+    #         "model": model_id,
+    #         "choices": [
+    #             {
+    #                 "index": 0,
+    #                 "delta": {},
+    #                 "finish_reason": "stop"
+    #             }
+    #         ]
+    #     }
+    #     yield f"data: {json.dumps(chunk)}\n\n"
+    #     yield "data: [DONE]\n\n"
 
     async def abort_request_on_disconnect(self, request_id: str) -> None:
         """Abort request when client disconnects"""
