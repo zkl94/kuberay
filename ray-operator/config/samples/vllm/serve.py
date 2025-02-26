@@ -17,6 +17,10 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
+# 新增导入 transformers 库，用于 NLLB
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+import torch
+
 logger = logging.getLogger("ray.serve")
 
 app = FastAPI()
@@ -236,62 +240,6 @@ class VLLMDeployment:
         yield f"data: {json.dumps(chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
-    # async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
-    #     """Generate streaming chat completion response"""
-    #     # First chunk with assistant role
-    #     chunk = {
-    #         "id": random_uuid(),
-    #         "object": "chat.completion.chunk",
-    #         "created": int(time.time()),
-    #         "model": model_id,
-    #         "choices": [
-    #             {
-    #                 "index": 0,
-    #                 "delta": {"role": "assistant"},
-    #                 "finish_reason": None
-    #             }
-    #         ]
-    #     }
-    #     yield f"data: {json.dumps(chunk)}\n\n"
-
-    #     # Stream content chunks
-    #     async for request_output in request_output_generator:
-    #         if len(request_output.outputs) == 0:
-    #             continue
-
-    #         delta_text = request_output.outputs[0].text
-    #         chunk = {
-    #             "id": random_uuid(),
-    #             "object": "chat.completion.chunk",
-    #             "created": int(time.time()),
-    #             "model": model_id,
-    #             "choices": [
-    #                 {
-    #                     "index": 0,
-    #                     "delta": {"content": delta_text},
-    #                     "finish_reason": None
-    #                 }
-    #             ]
-    #         }
-    #         yield f"data: {json.dumps(chunk)}\n\n"
-
-    #     # Final chunk signaling completion
-    #     chunk = {
-    #         "id": random_uuid(),
-    #         "object": "chat.completion.chunk",
-    #         "created": int(time.time()),
-    #         "model": model_id,
-    #         "choices": [
-    #             {
-    #                 "index": 0,
-    #                 "delta": {},
-    #                 "finish_reason": "stop"
-    #             }
-    #         ]
-    #     }
-    #     yield f"data: {json.dumps(chunk)}\n\n"
-    #     yield "data: [DONE]\n\n"
-
     async def abort_request_on_disconnect(self, request_id: str) -> None:
         """Abort request when client disconnects"""
         try:
@@ -314,19 +262,15 @@ class VLLMDeployment:
         # Extract sampling parameters
         sampling_params = {
             "temperature": request.get("temperature", 1.0),
-            # "top_p": request.get("top_p", 1.0),
+            "top_p": request.get("top_p", 1.0),
             "max_tokens": request.get("max_tokens", 1024),
-            # "stop": request.get("stop"),
-            # "frequency_penalty": request.get("frequency_penalty", 0.0),
-            # "presence_penalty": request.get("presence_penalty", 0.0),
+            "stop": request.get("stop"),
+            "frequency_penalty": request.get("frequency_penalty", 0.0),
+            "presence_penalty": request.get("presence_penalty", 0.0),
         }
 
         # Check if streaming is requested
         stream = request.get("stream", False)
-
-        # # Get generation results
-        # results_generator = self.engine.generate(
-        #     prompt, sampling_params, request_id)
 
         if stream:
             # For streaming requests, return information necessary to create a streaming response
@@ -404,15 +348,127 @@ class VLLMDeployment:
             return JSONResponse(content=error_response, status_code=400)
 
 
+# 新增 NLLB 翻译模型部署
+@serve.deployment(name="NLLBDeployment")
+class NLLBDeployment:
+    def __init__(self, model_id="facebook/nllb-200-3.3B"):
+        """初始化NLLB翻译模型"""
+        self.model_id = model_id
+        # 记录加载模型的开始时间
+        logger.info(f"开始加载NLLB模型: {model_id}")
+        start_time = time.time()
+
+        # 加载模型和分词器
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+        # 如果有GPU可用，将模型移至GPU
+        if torch.cuda.is_available():
+            self.model = self.model.to("cuda")
+
+        # 记录加载完成的时间
+        logger.info(f"NLLB模型加载完成，用时: {time.time() - start_time:.2f}秒")
+
+    async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
+        """翻译文本"""
+        # 确保语言代码格式正确
+        if source_lang not in self.tokenizer.lang_code_to_id:
+            logger.warning(f"源语言代码无效: {source_lang}，默认使用英语")
+            source_lang = "eng_Latn"
+
+        if target_lang not in self.tokenizer.lang_code_to_id:
+            logger.warning(f"目标语言代码无效: {target_lang}，默认使用中文")
+            target_lang = "cmn_Hans"
+
+        # 设备检测
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # 编码输入文本
+        inputs = self.tokenizer(text, return_tensors="pt").to(device)
+
+        # 生成翻译
+        translated_tokens = self.model.generate(
+            **inputs,
+            forced_bos_token_id=self.tokenizer.lang_code_to_id[target_lang],
+            max_length=512  # 可根据需要调整最大长度
+        )
+
+        # 解码生成的文本
+        translation = self.tokenizer.batch_decode(
+            translated_tokens, skip_special_tokens=True)[0]
+
+        return translation
+
+    async def handle_translation_request(self, request: dict) -> dict:
+        """处理翻译请求"""
+        # 提取请求参数
+        text = request.get("text", "")
+        source_lang = request.get("source_lang", "eng_Latn")
+        target_lang = request.get("target_lang", "cmn_Hans")
+
+        if not text:
+            return {
+                "error": {
+                    "message": "Text cannot be empty",
+                    "type": "invalid_request_error",
+                    "code": 400
+                }
+            }
+
+        try:
+            # 翻译文本
+            translation = await self.translate(text, source_lang, target_lang)
+
+            # 返回翻译结果
+            return {
+                "id": random_uuid(),
+                "object": "translation",
+                "created": int(time.time()),
+                "model": self.model_id,
+                "translation": translation,
+                "source_lang": source_lang,
+                "target_lang": target_lang
+            }
+
+        except Exception as e:
+            logger.exception(f"翻译错误: {e}")
+            return {
+                "error": {
+                    "message": str(e),
+                    "type": "translation_error",
+                    "code": 500
+                }
+            }
+
+    async def __call__(self, request_dict: dict) -> Any:
+        """处理API请求"""
+        try:
+            response = await self.handle_translation_request(request_dict)
+            return JSONResponse(content=response)
+
+        except Exception as e:
+            logger.exception(f"处理请求错误: {e}")
+            error_response = {
+                "error": {
+                    "message": str(e),
+                    "type": "invalid_request_error",
+                    "code": 400
+                }
+            }
+            return JSONResponse(content=error_response, status_code=400)
+
+
 @serve.deployment
 @serve.ingress(app)
 class MultiModelDeployment:
-    def __init__(self, models: Dict[str, DeploymentHandle]):
+    def __init__(self, models: Dict[str, DeploymentHandle], nllb_model: Optional[DeploymentHandle] = None):
         self.models = models
+        self.nllb_model = nllb_model
         # Create mapping from model IDs to friendly names
         self.model_id_to_name = {
             "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ": "deepseek-r1-70b",
             "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ": "mistral-small-24b",
+            "facebook/nllb-200-3.3B": "nllb-3.3b",  # 添加NLLB模型
         }
         # Reverse mapping for lookups
         self.name_to_model_id = {v: k for k,
@@ -430,6 +486,19 @@ class MultiModelDeployment:
                 "created": int(time.time()),
                 "owned_by": "kuberay-user",
             })
+
+        # 如果NLLB模型可用，也添加到列表中
+        if self.nllb_model:
+            available_models.append({
+                "id": "nllb-3.3b",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "kuberay-user",
+                "capabilities": {
+                    "translation": True
+                }
+            })
+
         return {"data": available_models, "object": "list"}
 
     @app.post("/v1/chat/completions")
@@ -502,6 +571,40 @@ class MultiModelDeployment:
             }
             return JSONResponse(status_code=500, content=error_response)
 
+    # 新增翻译API端点
+    @app.post("/v1/translations")
+    async def create_translation(self, request: Request):
+        """创建翻译，使用NLLB模型"""
+        if not self.nllb_model:
+            error_message = {
+                "error": {
+                    "message": "Translation service is not available",
+                    "type": "service_unavailable",
+                    "code": "translation_unavailable",
+                }
+            }
+            return JSONResponse(status_code=503, content=error_message)
+
+        try:
+            translation_request = await request.json()
+
+            # 调用NLLB模型进行翻译
+            response = await self.nllb_model.handle_translation_request.remote(translation_request)
+
+            # 返回翻译结果
+            return JSONResponse(content=response)
+
+        except Exception as e:
+            logger.exception(f"Error handling translation request: {e}")
+            error_response = {
+                "error": {
+                    "message": str(e),
+                    "type": "internal_server_error",
+                    "code": 500,
+                }
+            }
+            return JSONResponse(status_code=500, content=error_response)
+
     @app.get("/health")
     async def health_check(self):
         """Health check endpoint"""
@@ -542,8 +645,12 @@ def build_app() -> serve.Application:
     models_handles[model_2_id] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_2_kwargs)
 
-    # Create and return multi-model deployment
-    return MultiModelDeployment.bind(models_handles)
+    # 创建NLLB模型实例
+    nllb_model = NLLBDeployment.options(
+        ray_actor_options={"num_cpus": 2, "num_gpus": 1}).bind()
+
+    # Create and return multi-model deployment with NLLB
+    return MultiModelDeployment.bind(models_handles, nllb_model)
 
 
 # Application exposed in Ray Serve
