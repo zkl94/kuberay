@@ -314,11 +314,11 @@ class VLLMDeployment:
         # Extract sampling parameters
         sampling_params = {
             "temperature": request.get("temperature", 1.0),
-            "top_p": request.get("top_p", 1.0),
+            # "top_p": request.get("top_p", 1.0),
             "max_tokens": request.get("max_tokens", 1024),
-            "stop": request.get("stop"),
-            "frequency_penalty": request.get("frequency_penalty", 0.0),
-            "presence_penalty": request.get("presence_penalty", 0.0),
+            # "stop": request.get("stop"),
+            # "frequency_penalty": request.get("frequency_penalty", 0.0),
+            # "presence_penalty": request.get("presence_penalty", 0.0),
         }
 
         # Check if streaming is requested
