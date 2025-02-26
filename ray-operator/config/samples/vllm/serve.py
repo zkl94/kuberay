@@ -149,6 +149,73 @@ class VLLMDeployment:
             del os.environ['CUDA_VISIBLE_DEVICES']
         self.engine = AsyncLLMEngine.from_engine_args(args)
 
+    async def generate_streaming(self, prompt: str, sampling_params: dict, request_id: str = None) -> AsyncGenerator:
+        """Generate streaming response directly - to be called from other deployments"""
+        if request_id is None:
+            request_id = random_uuid()
+
+        # Convert dict to SamplingParams if needed
+        if isinstance(sampling_params, dict):
+            sampling_params = SamplingParams(**sampling_params)
+
+        # Get generation results
+        results_generator = self.engine.generate(
+            prompt, sampling_params, request_id)
+
+        # First chunk with assistant role
+        chunk = {
+            "id": random_uuid(),
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": self.model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None
+                }
+            ]
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+
+        # Stream content chunks
+        async for request_output in results_generator:
+            if len(request_output.outputs) == 0:
+                continue
+
+            delta_text = request_output.outputs[0].text
+            chunk = {
+                "id": random_uuid(),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": self.model_id,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": delta_text},
+                        "finish_reason": None
+                    }
+                ]
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+        # Final chunk signaling completion
+        chunk = {
+            "id": random_uuid(),
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": self.model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }
+            ]
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
     async def stream_chat_response(self, request_output_generator, model_id: str) -> AsyncGenerator[str, None]:
         """Generate streaming chat completion response"""
         # First chunk with assistant role
@@ -212,7 +279,7 @@ class VLLMDeployment:
         except Exception as e:
             logger.error(f"Error aborting request {request_id}: {e}")
 
-    async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, StreamingResponse]:
+    async def handle_chat_request(self, request: dict, model_id: str) -> Union[dict, dict]:
         """Process a chat completion request"""
         request_id = random_uuid()
 
@@ -237,9 +304,9 @@ class VLLMDeployment:
         # Check if streaming is requested
         stream = request.get("stream", False)
 
-        # Get generation results
-        results_generator = self.engine.generate(
-            prompt, sampling_params, request_id)
+        # # Get generation results
+        # results_generator = self.engine.generate(
+        #     prompt, sampling_params, request_id)
 
         if stream:
             # Return streaming response
@@ -253,12 +320,15 @@ class VLLMDeployment:
             # )
             return {
                 "stream": True,
-                "request_id": request_id,
-                "model_id": model_id,
-                # We can't pass the generator directly, so we'll handle generation in the ingress
                 "prompt": prompt,
-                "sampling_params": sampling_params
+                "sampling_params": sampling_params,
+                "model_id": model_id
             }
+
+        sampling_params_obj = SamplingParams(**sampling_params)
+
+        results_generator = self.engine.generate(
+            prompt, sampling_params_obj, request_id)
 
         # Non-streaming response
         final_output = None
@@ -386,41 +456,25 @@ class MultiModelDeployment:
             model_handle = self.models[model_id]
 
             # Pass request to the appropriate model handler
-            response = await model_handle.remote(model_request)
+            response = await model_handle.handle_chat_request.remote(model_request, model_id)
 
             # Check if this is a streaming response info dictionary
             if isinstance(response, dict) and response.get("stream") is True:
-                # Extract information needed for streaming
-                request_id = response.get("request_id")
-                model_id = response.get("model_id")
-
-                # Get a direct reference to the model deployment for streaming
-                # This is necessary because we can't pass the generator through DeploymentHandle
-                model_deployment = model_handle._handle.deployment_actor
-
-                # Create a new generator directly from the model deployment
-                results_generator = await model_deployment.engine.generate.remote(
+                # Create a streaming response
+                # Use handle.options(stream=True) to enable streaming
+                stream_generator = model_handle.options(stream=True).generate_streaming.remote(
                     response.get("prompt"),
-                    response.get("sampling_params"),
-                    request_id
+                    response.get("sampling_params")
                 )
 
-                # Create background tasks for cleanup
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(
-                    model_deployment.abort_request_on_disconnect.remote, request_id
-                )
-
-                # Create and return streaming response directly from the ingress
+                # Return a streaming response
                 return StreamingResponse(
-                    model_deployment.stream_chat_response.remote(
-                        results_generator, model_id),
-                    media_type="text/event-stream",
-                    background=background_tasks,
+                    stream_generator,
+                    media_type="text/event-stream"
                 )
 
-            # Pass through the response
-            return response
+            # For non-streaming responses, just pass through
+            return JSONResponse(content=response)
 
         except Exception as e:
             logger.exception(f"Error handling chat completion request: {e}")
