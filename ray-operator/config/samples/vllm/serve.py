@@ -292,14 +292,14 @@ class VLLMDeployment:
         prompt = messages_to_prompt(messages, model_id)
 
         # Extract sampling parameters
-        sampling_params = SamplingParams(
-            temperature=request.get("temperature", 1.0),
-            top_p=request.get("top_p", 1.0),
-            max_tokens=request.get("max_tokens", 1024),
-            stop=request.get("stop"),
-            frequency_penalty=request.get("frequency_penalty", 0.0),
-            presence_penalty=request.get("presence_penalty", 0.0),
-        )
+        sampling_params = {
+            "temperature": request.get("temperature", 1.0),
+            "top_p": request.get("top_p", 1.0),
+            "max_tokens": request.get("max_tokens", 1024),
+            "stop": request.get("stop"),
+            "frequency_penalty": request.get("frequency_penalty", 0.0),
+            "presence_penalty": request.get("presence_penalty", 0.0),
+        }
 
         # Check if streaming is requested
         stream = request.get("stream", False)
@@ -309,15 +309,7 @@ class VLLMDeployment:
         #     prompt, sampling_params, request_id)
 
         if stream:
-            # Return streaming response
-            # background_tasks = BackgroundTasks()
-            # background_tasks.add_task(
-            #     self.abort_request_on_disconnect, request_id)
-            # return StreamingResponse(
-            #     self.stream_chat_response(results_generator, model_id),
-            #     media_type="text/event-stream",
-            #     background=background_tasks,
-            # )
+            # For streaming requests, return information necessary to create a streaming response
             return {
                 "stream": True,
                 "prompt": prompt,
@@ -325,8 +317,11 @@ class VLLMDeployment:
                 "model_id": model_id
             }
 
+        # For non-streaming, use the existing code
+        # Convert dict to SamplingParams
         sampling_params_obj = SamplingParams(**sampling_params)
 
+        # Get generation results
         results_generator = self.engine.generate(
             prompt, sampling_params_obj, request_id)
 
