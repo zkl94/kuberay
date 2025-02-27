@@ -606,6 +606,83 @@ class NLLBDeployment:
 
         return translation
 
+    async def translate_with_protected_terms(self, text: str, target_lang: str,
+                                             protected_terms: List[str] = None) -> str:
+        """Translate text while protecting specific terms from translation"""
+        # Use the semaphore from the current event loop
+        # async with self.semaphore:
+        if not text:
+            return ""
+
+        # Default protected terms list
+        default_protected_terms = [
+            "Helpdesk", "IT Helpdesk", "NewCo", "IVR", "PRTG", "NOC", "L1", "L2", "L3",
+            "BRC", "SolvNow", "TOC", "GENAI", "RPA", "Webhelp", "GSD", "GSD Voice Infra",
+            "Avaya", "Helix", "GDPR", "Customer Xtreme Experience Center", "EMEA", "Subk",
+            "LATAM", "Global Service Desk", "ASA", "Driss", "telecom", "Webhelp.local",
+            "Cellbytel", "CNX", "SSO", "Conversation AI", "CXEC"
+        ]
+
+        # Merge user-provided and default terms
+        all_protected_terms = default_protected_terms
+        if protected_terms:
+            all_protected_terms.extend(protected_terms)
+
+        # Remove duplicates and sort by length (longest first)
+        all_protected_terms = sorted(
+            set(all_protected_terms), key=len, reverse=True)
+
+        # Step 1: Replace protected terms with placeholders
+        placeholders = {}
+        processed_text = text
+
+        for i, term in enumerate(all_protected_terms):
+            # Create unique placeholder token
+            placeholder = f"__PROTECTED_TERM_{i}__"
+
+            # Only add to mapping if term exists in text
+            if term in processed_text:
+                placeholders[placeholder] = term
+                processed_text = processed_text.replace(term, placeholder)
+
+        # Step 2: Translate the processed text
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        try:
+            # Normalize language codes
+            # source_lang = self._normalize_language_code(source_lang)
+            # target_lang = self._normalize_language_code(target_lang)
+
+            logger.info(f"Translating to {target_lang}")
+
+            # Encode the text
+            inputs = self.tokenizer(text, return_tensors="pt").to(device)
+
+            logger.info(f"Input tokens: {inputs}")
+
+            translated_tokens = self.model.generate(
+                **inputs,
+                forced_bos_token_id=self.tokenizer.convert_tokens_to_ids(
+                    target_lang),
+                max_length=512
+            )
+            logger.info(f"Translated tokens: {translated_tokens}")
+
+            translated_text = self.tokenizer.batch_decode(
+                translated_tokens, skip_special_tokens=True)[0]
+
+            # Step 3: Replace placeholders with original terms
+            for placeholder, original_term in placeholders.items():
+                translated_text = translated_text.replace(
+                    placeholder, original_term)
+
+            return translated_text
+
+        except Exception as e:
+            logger.exception(f"Translation error: {e}")
+            # Return original text on error
+            return text
+
     async def handle_translation_request(self, request: dict) -> dict:
         """Handle translation request"""
         # Get text and target language from request
@@ -623,7 +700,7 @@ class NLLBDeployment:
 
         try:
             # 翻译文本
-            translation = await self.translate(text, target_lang)
+            translation = await self.translate_with_protected_terms(text, target_lang)
 
             # 返回翻译结果
             return {
