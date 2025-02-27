@@ -606,6 +606,7 @@ class NLLBDeployment:
 
         return translation
 
+    # not in used atm beucase NLLB does not seem to be able to deal with protected terms
     async def translate_with_protected_terms(self, text: str, target_lang: str,
                                              protected_terms: List[str] = None) -> str:
         """Translate text while protecting specific terms from translation"""
