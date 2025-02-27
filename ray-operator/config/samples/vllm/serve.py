@@ -576,32 +576,25 @@ class NLLBDeployment:
         # 记录加载完成的时间
         logger.info(f"NLLB模型加载完成，用时: {time.time() - start_time:.2f}秒")
 
-    async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
+    async def translate(self, text: str, target_lang: str) -> str:
         """翻译文本"""
-        # 确保语言代码格式正确
-        logger.info(f'source_lang: {source_lang}, target_lang: {target_lang}')
-        if source_lang not in lang_code_to_id.values():
-            logger.warning(f"源语言代码无效: {source_lang}，默认使用英语")
-            source_lang = "eng_Latn"
+        logger.info(f'target_lang: {target_lang}')
 
         if target_lang not in lang_code_to_id.values():
-            logger.warning(f"目标语言代码无效: {target_lang}，默认使用中文")
-            target_lang = "cmn_Hans"
+            logger.warning(
+                f"Target language is not valid: {target_lang}, using zho_Hans by default")
+            target_lang = "zho_Hans"
 
-        # 设备检测
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {device}")
 
-        # 编码输入文本
         inputs = self.tokenizer(text, return_tensors="pt").to(device)
         logger.info(f"Input tokens: {inputs}")
 
-        # 生成翻译
         translated_tokens = self.model.generate(
             **inputs,
             forced_bos_token_id=self.tokenizer.convert_tokens_to_ids(
                 target_lang),
-            max_length=512  # 可根据需要调整最大长度
+            max_length=512
         )
         logger.info(f"Translated tokens: {translated_tokens}")
 
@@ -616,8 +609,7 @@ class NLLBDeployment:
         """处理翻译请求"""
         # 提取请求参数
         text = request.get("text", "")
-        source_lang = request.get("source_lang", "eng_Latn")
-        target_lang = request.get("target_lang", "cmn_Hans")
+        target_lang = request.get("target_lang", "zho_Hans")
 
         if not text:
             return {
@@ -630,7 +622,7 @@ class NLLBDeployment:
 
         try:
             # 翻译文本
-            translation = await self.translate(text, source_lang, target_lang)
+            translation = await self.translate(text, target_lang)
 
             # 返回翻译结果
             return {
@@ -639,7 +631,6 @@ class NLLBDeployment:
                 "created": int(time.time()),
                 "model": self.model_id,
                 "translation": translation,
-                "source_lang": source_lang,
                 "target_lang": target_lang
             }
 
