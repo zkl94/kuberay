@@ -671,12 +671,15 @@ class NLLBDeployment:
             translated_text = self.tokenizer.batch_decode(
                 translated_tokens, skip_special_tokens=True)[0]
 
+            print(f"translated_text: {translated_text}")
+
             # Step 3: Replace placeholders with original terms
             for placeholder, original_term in placeholders.items():
                 translated_text = translated_text.replace(
                     placeholder, original_term)
 
-            print(f"translated_text: {translated_text}")
+            print(
+                f"translated_text after replacing placeholders: {translated_text}")
 
             return translated_text
 
