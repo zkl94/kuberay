@@ -676,6 +676,8 @@ class NLLBDeployment:
                 translated_text = translated_text.replace(
                     placeholder, original_term)
 
+            print(f"translated_text: {translated_text}")
+
             return translated_text
 
         except Exception as e:
