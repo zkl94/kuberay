@@ -705,7 +705,7 @@ class NLLBDeployment:
 
         try:
             # 翻译文本
-            translation = await self.translate_with_protected_terms(text, target_lang)
+            translation = await self.translate(text, target_lang)
 
             # 返回翻译结果
             return {
