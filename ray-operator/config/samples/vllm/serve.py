@@ -559,15 +559,14 @@ class VLLMDeployment:
 @serve.deployment(name="NLLBDeployment")
 class NLLBDeployment:
     def __init__(self, model_id="facebook/nllb-200-3.3B"):
-        """初始化NLLB翻译模型"""
+        """Initialize NLLB model and tokenizer"""
         self.model_id = model_id
         # Log model loading
-        logger.info(f"开始加载NLLB模型: {model_id}")
+        logger.info(f"Start loading: {model_id}")
         start_time = time.time()
 
         # Load NLLB model and tokenizer
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_id, torch_dtype=torch.float16, attn_implementation="flash_attention_2")
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         # If CUDA is available, move model to GPU
@@ -608,7 +607,7 @@ class NLLBDeployment:
         return translation
 
     async def handle_translation_request(self, request: dict) -> dict:
-        """处理翻译请求"""
+        """Handle translation request"""
         # Get text and target language from request
         text = request.get("text", "")
         target_lang = request.get("target_lang", "zho_Hans")
@@ -647,7 +646,7 @@ class NLLBDeployment:
             }
 
     async def __call__(self, request_dict: dict) -> Any:
-        """处理API请求"""
+        """Handle API requests"""
         try:
             response = await self.handle_translation_request(request_dict)
             return JSONResponse(content=response)
@@ -853,7 +852,7 @@ def build_app() -> serve.Application:
 
     # 创建NLLB模型实例
     nllb_model = NLLBDeployment.options(
-        ray_actor_options={"num_cpus": 2, "num_gpus": 2}).bind()
+        ray_actor_options={"num_cpus": 2, "num_gpus": 1}).bind()
 
     # Create and return multi-model deployment with NLLB
     return MultiModelDeployment.bind(models_handles, nllb_model)
