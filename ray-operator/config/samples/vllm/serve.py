@@ -21,7 +21,7 @@ from vllm.utils import random_uuid
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import torch
 
-lang_code_to_id = {
+lang_code = {
     "Acehnese Arabic": "ace_Arab",
     "Acehnese Latin": "ace_Latn",
     "Mesopotamian Arabic": "acm_Arab",
@@ -561,26 +561,28 @@ class NLLBDeployment:
     def __init__(self, model_id="facebook/nllb-200-3.3B"):
         """初始化NLLB翻译模型"""
         self.model_id = model_id
-        # 记录加载模型的开始时间
+        # Log model loading
         logger.info(f"开始加载NLLB模型: {model_id}")
         start_time = time.time()
 
-        # 加载模型和分词器
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+        # Load NLLB model and tokenizer
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_id, torch_dtype=torch.float16, attn_implementation="flash_attention_2")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        # 如果有GPU可用，将模型移至GPU
+        # If CUDA is available, move model to GPU
         if torch.cuda.is_available():
             self.model = self.model.to("cuda")
 
-        # 记录加载完成的时间
-        logger.info(f"NLLB模型加载完成，用时: {time.time() - start_time:.2f}秒")
+        # Log model load time
+        logger.info(
+            f"NLLB model load time: {time.time() - start_time:.2f} seconds")
 
     async def translate(self, text: str, target_lang: str) -> str:
-        """翻译文本"""
+        """Use NLLB model to translate text"""
         logger.info(f'target_lang: {target_lang}')
 
-        if target_lang not in lang_code_to_id.values():
+        if target_lang not in lang_code.values():
             logger.warning(
                 f"Target language is not valid: {target_lang}, using zho_Hans by default")
             target_lang = "zho_Hans"
@@ -598,7 +600,7 @@ class NLLBDeployment:
         )
         logger.info(f"Translated tokens: {translated_tokens}")
 
-        # 解码生成的文本
+        # Decode translated tokens
         translation = self.tokenizer.batch_decode(
             translated_tokens, skip_special_tokens=True)[0]
         logger.info(f"Translation: {translation}")
@@ -607,7 +609,7 @@ class NLLBDeployment:
 
     async def handle_translation_request(self, request: dict) -> dict:
         """处理翻译请求"""
-        # 提取请求参数
+        # Get text and target language from request
         text = request.get("text", "")
         target_lang = request.get("target_lang", "zho_Hans")
 
@@ -851,7 +853,7 @@ def build_app() -> serve.Application:
 
     # 创建NLLB模型实例
     nllb_model = NLLBDeployment.options(
-        ray_actor_options={"num_cpus": 2, "num_gpus": 1}).bind()
+        ray_actor_options={"num_cpus": 2, "num_gpus": 2}).bind()
 
     # Create and return multi-model deployment with NLLB
     return MultiModelDeployment.bind(models_handles, nllb_model)
