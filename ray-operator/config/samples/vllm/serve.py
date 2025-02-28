@@ -353,7 +353,6 @@ class VLLMDeployment:
         https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
         """
         self.model_id = kwargs.get("model")
-        kwargs["concurrency"] = 32
         args = AsyncEngineArgs(**kwargs)
         # Fix for CUDA device visibility issue
         # https://github.com/vllm-project/vllm/issues/8402#issuecomment-2489432973
