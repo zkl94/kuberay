@@ -911,10 +911,6 @@ def build_app() -> serve.Application:
         "model": model_1_id,
         "tensor_parallel_size": 4,
         "quantization": "awq",
-        "quantization_config": {
-            "zero_point": True,      # Enable zero-point quantization
-            "group_size": 128,       # Adjust based on your model
-        },
         "max_num_batched_tokens": 4096,  # Control batch size
         "sliding_window": 4096,  # Enable sliding window attention
         "dtype": "half",  # Use FP16 for faster inference
