@@ -353,6 +353,7 @@ class VLLMDeployment:
         https://github.com/vllm-project/vllm/blob/main/vllm/engine/arg_utils.py
         """
         self.model_id = kwargs.get("model")
+        kwargs["concurrency"] = 32
         args = AsyncEngineArgs(**kwargs)
         # Fix for CUDA device visibility issue
         # https://github.com/vllm-project/vllm/issues/8402#issuecomment-2489432973
@@ -862,7 +863,7 @@ class MultiModelDeployment:
     # 新增翻译API端点
     @app.post("/v1/translations")
     async def create_translation(self, request: Request):
-        """创建翻译，使用NLLB模型"""
+        """Create translation, compatible with OpenAI API"""
         if not self.nllb_model:
             error_message = {
                 "error": {
@@ -876,10 +877,10 @@ class MultiModelDeployment:
         try:
             translation_request = await request.json()
 
-            # 调用NLLB模型进行翻译
+            # Pass request to the NLLB model handler
             response = await self.nllb_model.handle_translation_request.remote(translation_request)
 
-            # 返回翻译结果
+            # Return a JSON response
             return JSONResponse(content=response)
 
         except Exception as e:
@@ -910,14 +911,21 @@ def build_app() -> serve.Application:
         "model": model_1_id,
         "tensor_parallel_size": 4,
         "quantization": "awq",
+        "quantization_config": {
+            "zero_point": True,      # Enable zero-point quantization
+            "group_size": 128,       # Adjust based on your model
+        },
+        "max_num_batched_tokens": 4096,  # Control batch size
+        "sliding_window": 4096,  # Enable sliding window attention
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.90,  # Control GPU memory usage
         "max_model_len": 80960,  # Maximum token length
-        "max_num_seqs": 32,  # Maximum sequences per iteration
+        "max_num_seqs": 64,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
+        "enforce_eager": True,  # Reduce CUDA graph compilation overhead
     }
     models_handles[model_1_id] = VLLMDeployment.options(
-        ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
+        ray_actor_options={"num_cpus": 40, "num_gpus": 4}).bind(**model_1_kwargs)
 
     # Model 2: Mistral
     # model_2_id = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
@@ -933,9 +941,9 @@ def build_app() -> serve.Application:
     # models_handles[model_2_id] = VLLMDeployment.options(
     #     ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_2_kwargs)
 
-    # 创建NLLB模型实例
+    # Model 3: NLLB
     nllb_model = NLLBDeployment.options(
-        ray_actor_options={"num_cpus": 2, "num_gpus": 1}).bind()
+        ray_actor_options={"num_cpus": 3, "num_gpus": 1}).bind()
 
     # Create and return multi-model deployment with NLLB
     return MultiModelDeployment.bind(models_handles, nllb_model)
