@@ -917,21 +917,21 @@ def build_app() -> serve.Application:
         "trust_remote_code": True,  # Trust remote code if needed by model
     }
     models_handles[model_1_id] = VLLMDeployment.options(
-        ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
+        ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_1_kwargs)
 
     # Model 2: Mistral
-    model_2_id = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
-    model_2_kwargs = {
-        "model": model_2_id,
-        "tensor_parallel_size": 2,
-        "quantization": "awq",
-        "dtype": "half",
-        "gpu_memory_utilization": 0.85,
-        "max_num_seqs": 32,
-        "trust_remote_code": True,
-    }
-    models_handles[model_2_id] = VLLMDeployment.options(
-        ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_2_kwargs)
+    # model_2_id = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
+    # model_2_kwargs = {
+    #     "model": model_2_id,
+    #     "tensor_parallel_size": 2,
+    #     "quantization": "awq",
+    #     "dtype": "half",
+    #     "gpu_memory_utilization": 0.85,
+    #     "max_num_seqs": 32,
+    #     "trust_remote_code": True,
+    # }
+    # models_handles[model_2_id] = VLLMDeployment.options(
+    #     ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_2_kwargs)
 
     # 创建NLLB模型实例
     nllb_model = NLLBDeployment.options(
