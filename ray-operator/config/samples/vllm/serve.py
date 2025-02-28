@@ -921,7 +921,7 @@ def build_app() -> serve.Application:
         "swap_space": 4,         # GB of CPU swap space for offloading
         "enable_chunked_prefill": True,  # Enable chunked prefill
         "enable_prefix_caching": True,  # Enable prefix caching
-        "speculative_model": "casperhansen/deepseek-r1-distill-qwen-7b-awq",
+        "speculative_model": "casperhansen/deepseek-r1-distill-llama-8b-awq",
         "speculative_draft_tensor_parallel_size": 1,
         "num_speculative_tokens": 5,
     }
