@@ -908,7 +908,7 @@ def build_app() -> serve.Application:
     model_1_id = "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ"
     model_1_kwargs = {
         "model": model_1_id,
-        "tensor_parallel_size": 2,
+        "tensor_parallel_size": 4,
         "quantization": "awq",
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.90,  # Control GPU memory usage
@@ -917,7 +917,7 @@ def build_app() -> serve.Application:
         "trust_remote_code": True,  # Trust remote code if needed by model
     }
     models_handles[model_1_id] = VLLMDeployment.options(
-        ray_actor_options={"num_cpus": 4, "num_gpus": 2}).bind(**model_1_kwargs)
+        ray_actor_options={"num_cpus": 4, "num_gpus": 4}).bind(**model_1_kwargs)
 
     # Model 2: Mistral
     # model_2_id = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
