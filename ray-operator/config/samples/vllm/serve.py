@@ -911,7 +911,7 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": 2,
         "quantization": "awq",
         "dtype": "half",  # Use FP16 for faster inference
-        "gpu_memory_utilization": 0.85,  # Control GPU memory usage
+        "gpu_memory_utilization": 0.90,  # Control GPU memory usage
         "max_model_len": 80960,  # Maximum token length
         "max_num_seqs": 32,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
