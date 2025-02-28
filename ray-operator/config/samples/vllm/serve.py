@@ -911,7 +911,7 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": 4,
         "quantization": "awq",
         "max_num_batched_tokens": 32768,  # Control batch size
-        "dtype": "bfloat16",  # Use FP16 for faster inference
+        "dtype": "float16",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.90,  # Control GPU memory usage
         "max_model_len": 16384,  # Maximum token length
         "max_num_seqs": 64,  # Maximum sequences per iteration
