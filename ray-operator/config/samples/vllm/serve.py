@@ -916,7 +916,7 @@ def build_app() -> serve.Application:
         "max_model_len": 16384,  # Maximum token length
         "max_num_seqs": 64,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
-        "enforce_eager": True,  # Reduce CUDA graph compilation overhead
+        "enforce_eager": False,  # Reduce CUDA graph compilation overhead
         "block_size": 16,        # Optimize memory blocks
         "swap_space": 4,         # GB of CPU swap space for offloading
 
