@@ -912,15 +912,18 @@ def build_app() -> serve.Application:
         "quantization": "awq",
         "max_num_batched_tokens": 16384,  # Control batch size
         "dtype": "float16",  # Use FP16 for faster inference
-        "gpu_memory_utilization": 0.90,  # Control GPU memory usage
+        "gpu_memory_utilization": 0.85,  # Control GPU memory usage
         "max_model_len": 16384,  # Maximum token length
         "max_num_seqs": 32,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
         "enforce_eager": False,  # Reduce CUDA graph compilation overhead
         "block_size": 16,        # Optimize memory blocks
         "swap_space": 4,         # GB of CPU swap space for offloading
+        # Chunked prefill is enabled by default for models with max_model_len > 32K
         "enable_chunked_prefill": True,  # Enable chunked prefill
+        # Radix attention
         "enable_prefix_caching": True,  # Enable prefix caching
+        # vocab size should be the same as target model
         "speculative_model": "casperhansen/deepseek-r1-distill-llama-8b-awq",
         "speculative_draft_tensor_parallel_size": 1,
         "num_speculative_tokens": 5,
