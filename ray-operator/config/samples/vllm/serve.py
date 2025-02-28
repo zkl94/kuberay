@@ -912,7 +912,6 @@ def build_app() -> serve.Application:
         "tensor_parallel_size": 4,
         "quantization": "awq",
         "max_num_batched_tokens": 4096,  # Control batch size
-        "sliding_window": 4096,  # Enable sliding window attention
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.90,  # Control GPU memory usage
         "max_model_len": 80960,  # Maximum token length
