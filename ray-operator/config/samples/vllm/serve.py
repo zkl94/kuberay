@@ -910,13 +910,16 @@ def build_app() -> serve.Application:
         "model": model_1_id,
         "tensor_parallel_size": 4,
         "quantization": "awq",
-        "max_num_batched_tokens": 4096,  # Control batch size
+        "max_num_batched_tokens": 8192,  # Control batch size
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.90,  # Control GPU memory usage
-        "max_model_len": 80960,  # Maximum token length
+        "max_model_len": 16384,  # Maximum token length
         "max_num_seqs": 64,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
         "enforce_eager": True,  # Reduce CUDA graph compilation overhead
+        "block_size": 16,        # Optimize memory blocks
+        "swap_space": 4,         # GB of CPU swap space for offloading
+
     }
     models_handles[model_1_id] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 40, "num_gpus": 4}).bind(**model_1_kwargs)
