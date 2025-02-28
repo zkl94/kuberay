@@ -910,16 +910,19 @@ def build_app() -> serve.Application:
         "model": model_1_id,
         "tensor_parallel_size": 4,
         "quantization": "awq",
-        "max_num_batched_tokens": 32768,  # Control batch size
+        "max_num_batched_tokens": 16384,  # Control batch size
         "dtype": "float16",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.90,  # Control GPU memory usage
         "max_model_len": 16384,  # Maximum token length
-        "max_num_seqs": 64,  # Maximum sequences per iteration
+        "max_num_seqs": 32,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
         "enforce_eager": False,  # Reduce CUDA graph compilation overhead
         "block_size": 16,        # Optimize memory blocks
         "swap_space": 4,         # GB of CPU swap space for offloading
-
+        "enable_chunked_prefill": True,  # Enable chunked prefill
+        "enable_prefix_caching": True,  # Enable prefix caching
+        "speculative_model": "casperhansen/deepseek-r1-distill-qwen-7b-awq",
+        "speculative_draft_tensor_parallel_size": 1,
     }
     models_handles[model_1_id] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 40, "num_gpus": 4}).bind(**model_1_kwargs)
