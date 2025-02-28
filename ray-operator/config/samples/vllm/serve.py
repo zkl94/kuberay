@@ -923,6 +923,7 @@ def build_app() -> serve.Application:
         "enable_prefix_caching": True,  # Enable prefix caching
         "speculative_model": "casperhansen/deepseek-r1-distill-qwen-7b-awq",
         "speculative_draft_tensor_parallel_size": 1,
+        "num_speculative_tokens": 5,
     }
     models_handles[model_1_id] = VLLMDeployment.options(
         ray_actor_options={"num_cpus": 40, "num_gpus": 4}).bind(**model_1_kwargs)
