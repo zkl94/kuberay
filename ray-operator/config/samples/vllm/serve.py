@@ -912,7 +912,7 @@ def build_app() -> serve.Application:
         "quantization": "awq",
         "max_num_batched_tokens": 16384,  # Control batch size
         "dtype": "float16",  # Use FP16 for faster inference
-        "gpu_memory_utilization": 0.7,  # Control GPU memory usage
+        "gpu_memory_utilization": 0.75,  # Control GPU memory usage
         "max_model_len": 16384,  # Maximum token length
         "max_num_seqs": 32,  # Maximum sequences per iteration
         "trust_remote_code": True,  # Trust remote code if needed by model
