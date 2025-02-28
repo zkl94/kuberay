@@ -910,7 +910,7 @@ def build_app() -> serve.Application:
         "model": model_1_id,
         "tensor_parallel_size": 4,
         "quantization": "awq",
-        "max_num_batched_tokens": 8192,  # Control batch size
+        "max_num_batched_tokens": 32768,  # Control batch size
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.90,  # Control GPU memory usage
         "max_model_len": 16384,  # Maximum token length
