@@ -908,7 +908,7 @@ def build_app() -> serve.Application:
     model_1_id = "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ"
     model_1_kwargs = {
         "model": model_1_id,
-        "tensor_parallel_size": 4,
+        "tensor_parallel_size": 2,
         "quantization": "awq",
         "dtype": "half",  # Use FP16 for faster inference
         "gpu_memory_utilization": 0.85,  # Control GPU memory usage
