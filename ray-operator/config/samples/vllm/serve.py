@@ -937,7 +937,7 @@ def build_app() -> serve.Application:
 
     # Model 3: NLLB
     nllb_model = NLLBDeployment.options(
-        ray_actor_options={"num_cpus": 3, "num_gpus": 1}).bind()
+        ray_actor_options={"num_cpus": 2, "num_gpus": 1}).bind()
 
     # Create and return multi-model deployment with NLLB
     return MultiModelDeployment.bind(models_handles, nllb_model)
